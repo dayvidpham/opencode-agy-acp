@@ -1,0 +1,21 @@
+{
+  "name": "opencode-agy-acp",
+  "version": "0.1.0",
+  "description": "OpenCode 2.0 plugin that drives Google Antigravity CLI (agy acp) over ACP with native OpenCode permission bridging.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "keywords": [
+    "opencode",
+    "antigravity",
+    "agy",
+    "acp",
+    "plugin"
+  ],
+  "license": "MIT"
+}
