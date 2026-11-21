@@ -21,20 +21,20 @@ Nothing `agy` produces is verified. Reading diffs, checking files, and running t
 - **Avoid leading `/` in prompts:** `agy` expands slash commands/skills when a prompt begins with `/` (or leading whitespace/newlines followed by `/`). Always start the prompt with a normal word (e.g., `Review the diff`, not `/review`).
 - **Wait for subagents:** If delegating complex work, ask `agy` to wait for any internal subagents before finishing so its final response contains the complete result.
 
-## Model selection (`gemini-4` and `claude-5-5` families only)
+## Model selection (`gemini-4` preferred; `claude-5-5` secondary)
 
-Only use models from the **`gemini-4`** and **`claude-5-5`** families:
+Only use models from the **`gemini-4`** and **`claude-5-5`** families. **Prefer Gemini 4 models by default** (Neon outperforms Opus 5.5 on most published benchmarks); use Claude 5.5 mainly when a cross-model second opinion or Claude-specific preference is requested.
 
-- `gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}`
-- `{gemini-4-argon|claude-opus-5-5|claude-sonnet-5-5}-{low|medium|high}`
+- **Gemini 4 (preferred):** `gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}`, `gemini-4-argon-{low|medium|high}`
+- **Claude 5.5 (secondary):** `claude-{opus|sonnet}-5-5-{low|medium|high}`
 
 | Model family | Effort levels | Best used for |
 | --- | --- | --- |
 | `gemini-4-hydrogen-*` | `low`, `medium`, `high`, `xhigh` | Fast everyday coding & agentic workhorse: bulk implementation, scaffolding, test generation, and subagent execution (Sonnet-class speed/efficiency). |
-| `gemini-4-neon-*` | `low`, `medium`, `high`, `xhigh` | Opus-class flagship coding & agentic model: complex multi-step engineering, deep debugging, and high-judgment orchestration. |
+| `gemini-4-neon-*` | `low`, `medium`, `high`, `xhigh` | Default flagship coding & agentic model (Opus-class, outperforming Opus 5.5 on most benchmarks): complex multi-step engineering, deep debugging, and high-judgment orchestration. |
 | `gemini-4-argon-*` | `low`, `medium`, `high` | Fable-class frontier reasoning model: hardest architectural judgment, long-horizon projects, and deepest problem-solving. |
-| `claude-sonnet-5-5-*` | `low`, `medium`, `high` | Careful code reviews, correctness-focused edits, and clean multi-file refactors. |
-| `claude-opus-5-5-*` | `low`, `medium`, `high` | Hardest refactors, gnarly bugs, and second-opinion reviews on risky diffs. |
+| `claude-sonnet-5-5-*` | `low`, `medium`, `high` | Secondary cross-model option for careful code reviews and clean edits. |
+| `claude-opus-5-5-*` | `low`, `medium`, `high` | Secondary cross-model option for second-opinion reviews on risky diffs or gnarly refactors. |
 
 ## Session continuity & timeouts
 
