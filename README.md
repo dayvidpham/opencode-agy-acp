@@ -1,5 +1,7 @@
 # opencode-agy-acp
 
+![OpenCode agy-trace panel](docs/agy-trace-panel.jpg)
+
 Zero-dependency OpenCode 2.x plugin (`dayvidpham.opencode-agy-acp`) that drives the official Google Antigravity CLI (`agy acp`) over the Agent Client Protocol (ACP), bridges permission requests into OpenCode's native `ctx.permission.assert(...)` rules, and streams live step progress into the OpenCode TUI.
 
 ## Why ACP instead of `agy -p` or OAuth plugins?
@@ -30,8 +32,6 @@ Optional environment variables:
 - `AGY_BIN`: override the `agy` binary path (defaults to `agy` on `PATH`).
 
 ## Slash Commands & TUI Trace Panel
-
-![OpenCode agy-trace panel](docs/agy-trace-panel.jpg)
 
 - **`/agy <task>`** — delegates a task to the `agy` tool with structured prompt guidance.
 - **`/agy-trace`** (or `Ctrl+P` → **Toggle agy trace panel**) — opens or closes the scrollable `agy-trace` panel (`session.panel`) showing all running and completed `agy` runs in the current session. Running trajectories expand automatically; completed runs start collapsed and can be toggled individually or all at once.
