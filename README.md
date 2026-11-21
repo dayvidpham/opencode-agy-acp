@@ -7,7 +7,7 @@ Zero-dependency OpenCode 2.x plugin (`dayvidpham.opencode-agy-acp`) that drives 
 - **No OAuth token spoofing:** Authentication stays inside the official `agy` CLI (`~/.gemini/antigravity-cli/`).
 - **Native OpenCode permissions:** ACP `session/request_permission` requests from `agy` are mapped to OpenCode's `read` / `edit` / `bash` / `webfetch` / `agy` actions and evaluated through `ctx.permission.assert(...)`, using your existing `opencode.json` rules and interactive prompts.
 - **Explicit sessions & concurrent runs:** Spawns an isolated `agy acp` subprocess per tool call so multiple `agy` agents can run concurrently (including in parallel inside OpenCode Code Mode `execute`). Omitting `session_id` always starts a fresh session; passing `session_id` explicitly continues that session via ACP `session/load` (failing loudly with `AGY_ERROR [SESSION_LOAD_FAILED]` if it cannot be loaded).
-- **Live TUI step streaming:** Exports a `./tui` OpenCode 2.x TUI plugin that renders a live activity feed above the prompt (`session.composer.top`) and a scrollable full trace panel (`session.panel`). Uses a lightweight atomic trace store (`/tmp/opencode-agy-acp-traces/<sessionID>.json`) so live steps stream identically for both direct `agy` tool calls and nested Code Mode (`execute`) calls.
+- **Live TUI step streaming:** Exports a `./tui` OpenCode 2.x TUI plugin that renders a zero-extra-height live indicator in `prompt.footer.status` (next to subagents/shells) and a scrollable, collapsible trace panel in `session.panel` (`/agy-trace`). Uses a lightweight atomic trace store (`/tmp/opencode-agy-acp-traces/<sessionID>.json`) so live steps stream identically for both direct `agy` tool calls and nested Code Mode (`execute`) calls.
 - **Hot-reload & cancellation hygiene:** Forwards `AbortSignal` to ACP `session/cancel`, closes each subprocess in `finally`, and does not kill in-flight `agy` turns when the plugin hot-reloads.
 - **Scrubbed environment:** Passes only an explicit allowlist (`PATH`, `HOME`, `XDG_*`, `AGY_*`, `NIX_*`, locale/proxy/TLS vars) to `agy acp` so unrelated provider API keys are never leaked.
 
@@ -32,8 +32,8 @@ Optional environment variables:
 ## Slash Commands & TUI Trace Panel
 
 - **`/agy <task>`** — delegates a task to the `agy` tool with structured prompt guidance.
-- **`/agy-trace`** (or `Ctrl+P` → **Toggle agy trace panel**) — opens or closes the scrollable `agy-trace` panel (`session.panel`) showing all running and completed `agy` runs in the current session.
-- **Live activity feed (`session.composer.top`)** — automatically appears above the prompt box while one or more `agy` agents are running (showing model, short session ID, step count, elapsed timer, active plan items, recent tool calls with paths/commands, and latest thought/output line). Clicking it opens the full trace panel.
+- **`/agy-trace`** (or `Ctrl+P` → **Toggle agy trace panel**) — opens or closes the scrollable `agy-trace` panel (`session.panel`) showing all running and completed `agy` runs in the current session. Running trajectories expand automatically; completed runs start collapsed and can be toggled individually or all at once.
+- **Live footer indicator (`prompt.footer.status`)** — appears inline in the prompt footer while one or more `agy` agents are running (e.g. `◈ 3 agy (180 steps)`) without taking extra vertical space. Clicking it opens the full trace panel.
 
 ### Trace Panel Keyboard Shortcuts
 
@@ -41,6 +41,9 @@ When the `agy-trace` panel is focused (or in fullscreen):
 
 | Key | Action |
 | --- | --- |
+| `Tab` / `Shift+Tab` | Select next / previous trajectory |
+| `Enter` / `Space` (or click header) | Expand / collapse selected trajectory |
+| `e` / `c` | Expand all / collapse all trajectories |
 | `f` | Toggle fullscreen / split |
 | `q` / `Esc` | Close panel |
 | `j` / `↓`, `k` / `↑` | Scroll down / up |

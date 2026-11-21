@@ -1,9 +1,9 @@
 /** @jsxImportSource @opentui/solid */
 // OpenCode 2.0 TUI plugin for `opencode-agy-acp`.
 //
-// Renders live-streaming `agy acp` steps from `toolCtx.progress(...)` metadata:
-// 1. `session.composer.top`: compact live activity feed while `agy` is running.
-// 2. `session.panel`: scrollable full step trace for running and completed runs.
+// Renders live-streaming `agy acp` steps from the per-session trace store:
+// 1. `prompt.footer.status`: compact single-line live indicator (0 extra vertical height).
+// 2. `session.panel`: scrollable, collapsible full step trace (`/agy-trace`).
 
 import { Plugin } from "@opencode/plugin/tui";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Accessor } from "solid-js";
@@ -292,122 +292,47 @@ export default Plugin.define({
       ],
     }));
 
-    const disposeComposerTop = ctx.ui.slot({
-      append: "session.composer.top",
+    const disposeFooterStatus = ctx.ui.slot({
+      prepend: "prompt.footer.status",
       render(input) {
         const allRuns = useSessionAgyRuns(
-          () => input.sessionID,
-          () => ctx.data.session.message.list(input.sessionID),
-          () => ctx.data.session.status(input.sessionID),
+          () => input.sessionID ?? "",
+          () => (input.sessionID ? ctx.data.session.message.list(input.sessionID) : []),
+          () => (input.sessionID ? ctx.data.session.status(input.sessionID) : "idle"),
         );
         const runningRuns = createMemo(() =>
           allRuns().filter(
             (run) => run.status === "running" || run.status === "streaming",
           ),
         );
+        const [hovered, setHovered] = createSignal(false);
 
-        const [now, setNow] = createSignal(Date.now());
-        createEffect(() => {
-          if (runningRuns().length === 0) return;
-          setNow(Date.now());
-          const timer = setInterval(() => setNow(Date.now()), 1000);
-          onCleanup(() => clearInterval(timer));
+        const summary = createMemo(() => {
+          const active = runningRuns();
+          if (active.length === 0) return "";
+          if (active.length === 1) {
+            const run = active[0]!;
+            const steps = run.toolCallCount > 0 ? ` (${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"})` : "";
+            return `◈ 1 agy${steps} · `;
+          }
+          const totalSteps = active.reduce((acc, r) => acc + r.toolCallCount, 0);
+          return `◈ ${active.length} agy${totalSteps > 0 ? ` (${totalSteps} steps)` : ""} · `;
         });
 
         return (
-          <Show when={runningRuns().length > 0}>
+          <Show when={input.mode === "normal" && runningRuns().length > 0}>
             <box
-              flexDirection="column"
               flexShrink={0}
-              border={["left"]}
-              borderColor={ctx.theme.border.base}
-              backgroundColor={ctx.theme.background.raised.base}
-              paddingLeft={2}
-              paddingRight={2}
-              paddingTop={1}
-              paddingBottom={1}
-              gap={1}
+              onMouseOver={() => setHovered(true)}
+              onMouseOut={() => setHovered(false)}
               onMouseUp={() => ctx.ui.panel.open(PANEL_NAME, { presentation: "panel" })}
             >
-              <For each={runningRuns()}>
-                {(run) => {
-                  const elapsed = createMemo(() => formatDuration(run.startedAt, now()));
-                  const recentSteps = createMemo(() => run.toolCalls.slice(-4));
-                  const activePlan = createMemo(() =>
-                    run.plan
-                      .filter((p) => {
-                        const st = (p.status ?? "").toLowerCase();
-                        return st !== "completed" && st !== "done";
-                      })
-                      .slice(0, 2),
-                  );
-                  const previewLine = createMemo(() => run.latestText ?? run.latestThought);
-
-                  return (
-                    <box flexDirection="column">
-                      <box flexDirection="row" justifyContent="space-between" gap={1}>
-                        <text fg={ctx.theme.text.base} wrapMode="none" truncate>
-                          {`◈ agy${run.model ? ` · ${run.model}` : ""}${run.agySessionId ? ` · ${shortId(run.agySessionId)}` : ""}${run.toolCallCount > 0 ? ` · ${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"}` : ""}${elapsed() ? ` · ${elapsed()}` : ""}`}
-                        </text>
-                        <text fg={ctx.theme.text.muted} flexShrink={0}>
-                          click for trace
-                        </text>
-                      </box>
-
-                      <Show when={activePlan().length > 0}>
-                        <box flexDirection="column" paddingLeft={2}>
-                          <For each={activePlan()}>
-                            {(entry) => (
-                              <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
-                                {`${planIcon(entry.status)} ${entry.content}`}
-                              </text>
-                            )}
-                          </For>
-                        </box>
-                      </Show>
-
-                      <Show
-                        when={recentSteps().length > 0}
-                        fallback={
-                          <box paddingLeft={2}>
-                            <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
-                              {`› ${run.currentActivity ?? "Starting…"}`}
-                            </text>
-                          </box>
-                        }
-                      >
-                        <box flexDirection="column" paddingLeft={2}>
-                          <For each={recentSteps()}>
-                            {(step) => (
-                              <text
-                                fg={
-                                  isStepError(step.status)
-                                    ? ctx.theme.text.feedback.error.base
-                                    : ctx.theme.text.muted
-                                }
-                                wrapMode="none"
-                                truncate
-                              >
-                                {`${stepIcon(step.status)} ${step.title}${step.detail ? ` — ${step.detail}` : ""}`}
-                              </text>
-                            )}
-                          </For>
-                        </box>
-                      </Show>
-
-                      <Show when={previewLine()}>
-                        {(line) => (
-                          <box paddingLeft={2}>
-                            <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
-                              {`… ${line()}`}
-                            </text>
-                          </box>
-                        )}
-                      </Show>
-                    </box>
-                  );
-                }}
-              </For>
+              <text
+                fg={hovered() ? ctx.theme.text.base : ctx.theme.text.muted}
+                wrapMode="none"
+              >
+                {summary()}
+              </text>
             </box>
           </Show>
         );
@@ -430,6 +355,45 @@ export default Plugin.define({
         const hasRunning = createMemo(() =>
           allRuns().some((r) => r.status === "running" || r.status === "streaming"),
         );
+
+        // Explicit user collapse/expand overrides keyed by run.id.
+        // Default: running runs are expanded, completed/errored runs are collapsed.
+        const [overrides, setOverrides] = createSignal<Record<string, boolean>>({});
+        const [selectedIndex, setSelectedIndex] = createSignal(0);
+
+        createEffect(() => {
+          const count = allRuns().length;
+          if (count === 0) {
+            setSelectedIndex(0);
+          } else if (selectedIndex() >= count) {
+            setSelectedIndex(count - 1);
+          }
+        });
+
+        const isExpanded = (run: AgyRunView): boolean => {
+          const override = overrides()[run.id];
+          if (override !== undefined) return override;
+          return run.status === "running" || run.status === "streaming";
+        };
+
+        const toggleRun = (run: AgyRunView) => {
+          const next = !isExpanded(run);
+          setOverrides((prev) => ({ ...prev, [run.id]: next }));
+        };
+
+        const setAllExpanded = (expanded: boolean) => {
+          const next: Record<string, boolean> = {};
+          for (const run of allRuns()) {
+            next[run.id] = expanded;
+          }
+          setOverrides(next);
+        };
+
+        const moveSelection = (delta: number) => {
+          const count = allRuns().length;
+          if (count === 0) return;
+          setSelectedIndex((idx) => (idx + delta + count) % count);
+        };
 
         let scroll: { scrollBy?: (delta: number) => void; scrollTo?: (y: number) => void; scrollHeight?: number } | undefined;
 
@@ -462,6 +426,48 @@ export default Plugin.define({
               title: "Close agy trace panel",
               group: "Antigravity",
               run: () => input.close(),
+            },
+            {
+              bind: "tab",
+              title: "Next trajectory",
+              group: "Antigravity",
+              run: () => moveSelection(1),
+            },
+            {
+              bind: "shift+tab",
+              title: "Previous trajectory",
+              group: "Antigravity",
+              run: () => moveSelection(-1),
+            },
+            {
+              bind: "return",
+              title: "Toggle selected trajectory",
+              group: "Antigravity",
+              run: () => {
+                const run = allRuns()[selectedIndex()];
+                if (run) toggleRun(run);
+              },
+            },
+            {
+              bind: "space",
+              title: "Toggle selected trajectory",
+              group: "Antigravity",
+              run: () => {
+                const run = allRuns()[selectedIndex()];
+                if (run) toggleRun(run);
+              },
+            },
+            {
+              bind: "c",
+              title: "Collapse all trajectories",
+              group: "Antigravity",
+              run: () => setAllExpanded(false),
+            },
+            {
+              bind: "e",
+              title: "Expand all trajectories",
+              group: "Antigravity",
+              run: () => setAllExpanded(true),
             },
             {
               bind: "j",
@@ -543,6 +549,12 @@ export default Plugin.define({
                   {`◈ agy trace (${allRuns().length} ${allRuns().length === 1 ? "run" : "runs"})`}
                 </text>
                 <box flexDirection="row" gap={2} flexShrink={0}>
+                  <text fg={ctx.theme.text.muted} onMouseUp={() => setAllExpanded(true)}>
+                    [e expand]
+                  </text>
+                  <text fg={ctx.theme.text.muted} onMouseUp={() => setAllExpanded(false)}>
+                    [c collapse]
+                  </text>
                   <text fg={ctx.theme.text.muted} onMouseUp={() => input.toggleFullscreen()}>
                     {input.presentation === "fullscreen" ? "[f split]" : "[f fullscreen]"}
                   </text>
@@ -563,99 +575,128 @@ export default Plugin.define({
                 <scrollbox flexGrow={1} ref={(el: unknown) => { scroll = el as typeof scroll; }}>
                   <box flexDirection="column" gap={1}>
                     <For each={allRuns()}>
-                      {(run) => {
+                      {(run, index) => {
                         const duration = createMemo(() =>
                           formatDuration(run.startedAt, run.completedAt ?? now()),
+                        );
+                        const expanded = createMemo(() => isExpanded(run));
+                        const selected = createMemo(() => index() === selectedIndex());
+                        const statusGlyph = createMemo(() =>
+                          run.status === "running" || run.status === "streaming"
+                            ? "●"
+                            : run.status === "completed"
+                              ? "✓"
+                              : "✗",
                         );
                         return (
                           <box
                             flexDirection="column"
                             border={["left"]}
-                            borderColor={ctx.theme.border.base}
+                            borderColor={selected() ? ctx.theme.text.base : ctx.theme.border.base}
                             backgroundColor={ctx.theme.background.raised.base}
                             paddingLeft={2}
                             paddingRight={2}
                             paddingTop={1}
                             paddingBottom={1}
-                            gap={1}
+                            gap={expanded() ? 1 : 0}
                           >
-                            <box flexDirection="column">
+                            <box
+                              flexDirection="column"
+                              onMouseUp={() => {
+                                setSelectedIndex(index());
+                                toggleRun(run);
+                              }}
+                            >
                               <text
                                 fg={
                                   run.status === "error"
                                     ? ctx.theme.text.feedback.error.base
                                     : ctx.theme.text.base
                                 }
+                                wrapMode="none"
+                                truncate
                               >
-                                {`${run.status === "running" || run.status === "streaming" ? "●" : run.status === "completed" ? "✓" : "✗"} ${run.status}${run.model ? ` · ${run.model}` : ""}${duration() ? ` · ${duration()}` : ""}${run.toolCallCount > 0 ? ` · ${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"}` : ""}`}
+                                {`${expanded() ? "▾" : "▸"} ${statusGlyph()} ${run.status}${run.model ? ` · ${run.model}` : ""}${duration() ? ` · ${duration()}` : ""}${run.toolCallCount > 0 ? ` · ${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"}` : ""}${run.agySessionId ? ` · ${shortId(run.agySessionId)}` : ""}`}
                               </text>
-                              <Show when={run.agySessionId}>
-                                {(sid) => (
-                                  <text fg={ctx.theme.text.muted}>
-                                    {`session_id: ${sid()}`}
-                                  </text>
-                                )}
-                              </Show>
-                              <Show when={run.prompt}>
-                                <text fg={ctx.theme.text.muted} wrapMode="word">
-                                  {`prompt: ${truncateLine(run.prompt, 240)}`}
+                              <Show when={!expanded() && run.prompt}>
+                                <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
+                                  {`  ${truncateLine(run.prompt, 120)}`}
                                 </text>
                               </Show>
                             </box>
 
-                            <Show when={run.plan.length > 0}>
-                              <box flexDirection="column">
-                                <text fg={ctx.theme.text.base}>Plan</text>
-                                <For each={run.plan}>
-                                  {(entry) => (
+                            <Show when={expanded()}>
+                              <box flexDirection="column" gap={1}>
+                                <box flexDirection="column">
+                                  <Show when={run.agySessionId}>
+                                    {(sid) => (
+                                      <text fg={ctx.theme.text.muted}>
+                                        {`session_id: ${sid()}`}
+                                      </text>
+                                    )}
+                                  </Show>
+                                  <Show when={run.prompt}>
                                     <text fg={ctx.theme.text.muted} wrapMode="word">
-                                      {`  ${planIcon(entry.status)} ${entry.content}`}
+                                      {`prompt: ${truncateLine(run.prompt, 240)}`}
+                                    </text>
+                                  </Show>
+                                </box>
+
+                                <Show when={run.plan.length > 0}>
+                                  <box flexDirection="column">
+                                    <text fg={ctx.theme.text.base}>Plan</text>
+                                    <For each={run.plan}>
+                                      {(entry) => (
+                                        <text fg={ctx.theme.text.muted} wrapMode="word">
+                                          {`  ${planIcon(entry.status)} ${entry.content}`}
+                                        </text>
+                                      )}
+                                    </For>
+                                  </box>
+                                </Show>
+
+                                <Show when={run.toolCalls.length > 0}>
+                                  <box flexDirection="column">
+                                    <text fg={ctx.theme.text.base}>Steps</text>
+                                    <For each={run.toolCalls}>
+                                      {(step) => (
+                                        <text
+                                          fg={
+                                            isStepError(step.status)
+                                              ? ctx.theme.text.feedback.error.base
+                                              : ctx.theme.text.muted
+                                          }
+                                          wrapMode="word"
+                                        >
+                                          {`  ${stepIcon(step.status)} ${step.title}${step.detail ? ` — ${step.detail}` : ""}`}
+                                        </text>
+                                      )}
+                                    </For>
+                                  </box>
+                                </Show>
+
+                                <Show when={run.latestThought}>
+                                  {(thought) => (
+                                    <text fg={ctx.theme.text.muted} wrapMode="word">
+                                      {`thought: ${thought()}`}
                                     </text>
                                   )}
-                                </For>
-                              </box>
-                            </Show>
+                                </Show>
 
-                            <Show when={run.toolCalls.length > 0}>
-                              <box flexDirection="column">
-                                <text fg={ctx.theme.text.base}>Steps</text>
-                                <For each={run.toolCalls}>
-                                  {(step) => (
-                                    <text
-                                      fg={
-                                        isStepError(step.status)
-                                          ? ctx.theme.text.feedback.error.base
-                                          : ctx.theme.text.muted
-                                      }
-                                      wrapMode="word"
-                                    >
-                                      {`  ${stepIcon(step.status)} ${step.title}${step.detail ? ` — ${step.detail}` : ""}`}
+                                <Show when={run.latestText && (run.status === "running" || run.status === "streaming")}>
+                                  <text fg={ctx.theme.text.base} wrapMode="word">
+                                    {`output: ${run.latestText}`}
+                                  </text>
+                                </Show>
+
+                                <Show when={run.errorMessage}>
+                                  {(err) => (
+                                    <text fg={ctx.theme.text.feedback.error.base} wrapMode="word">
+                                      {`error: ${err()}`}
                                     </text>
                                   )}
-                                </For>
+                                </Show>
                               </box>
-                            </Show>
-
-                            <Show when={run.latestThought}>
-                              {(thought) => (
-                                <text fg={ctx.theme.text.muted} wrapMode="word">
-                                  {`thought: ${thought()}`}
-                                </text>
-                              )}
-                            </Show>
-
-                            <Show when={run.latestText && (run.status === "running" || run.status === "streaming")}>
-                              <text fg={ctx.theme.text.base} wrapMode="word">
-                                {`output: ${run.latestText}`}
-                              </text>
-                            </Show>
-
-                            <Show when={run.errorMessage}>
-                              {(err) => (
-                                <text fg={ctx.theme.text.feedback.error.base} wrapMode="word">
-                                  {`error: ${err()}`}
-                                </text>
-                              )}
                             </Show>
                           </box>
                         );
@@ -664,6 +705,10 @@ export default Plugin.define({
                   </box>
                 </scrollbox>
               </Show>
+
+              <text fg={ctx.theme.text.muted} flexShrink={0} wrapMode="none" truncate>
+                tab select · enter/click toggle · e/c expand/collapse all · j/k scroll · g/G top/bottom
+              </text>
             </box>
           </Show>
         );
@@ -671,7 +716,7 @@ export default Plugin.define({
     });
 
     return () => {
-      disposeComposerTop();
+      disposeFooterStatus();
       disposePanel();
     };
   },
