@@ -103,3 +103,50 @@ export function readSessionTraces(
     return [];
   }
 }
+
+export interface CollapsedTraceStep {
+  readonly step: AgyTraceToolCall;
+  readonly icon: string;
+  readonly text: string;
+  readonly isError: boolean;
+  readonly count: number;
+}
+
+export function stepIcon(status: string | undefined): string {
+  const st = (status ?? "").toLowerCase();
+  if (st === "completed" || st === "done") return "✓";
+  if (st === "failed" || st === "error" || st === "cancelled") return "✗";
+  return "›";
+}
+
+export function isStepError(status: string | undefined): boolean {
+  const st = (status ?? "").toLowerCase();
+  return st === "failed" || st === "error" || st === "cancelled";
+}
+
+export function formatStepText(step: AgyTraceToolCall): string {
+  const title = step.title.replace(/\s+/g, " ").trim();
+  const detail = step.detail?.replace(/\s+/g, " ").trim();
+  if (!detail || detail === title) return title;
+  const prefix = detail.endsWith("…") ? detail.slice(0, -1).trim() : detail;
+  if (prefix.length > 0 && title.startsWith(prefix)) return title;
+  return `${title} — ${detail}`;
+}
+
+export function collapseConsecutiveSteps(
+  steps: readonly AgyTraceToolCall[],
+): CollapsedTraceStep[] {
+  const out: CollapsedTraceStep[] = [];
+  for (const step of steps) {
+    const icon = stepIcon(step.status);
+    const text = formatStepText(step);
+    const isError = isStepError(step.status);
+    const prev = out[out.length - 1];
+    if (prev && prev.icon === icon && prev.text === text && prev.isError === isError) {
+      out[out.length - 1] = { ...prev, count: prev.count + 1 };
+    } else {
+      out.push({ step, icon, text, isError, count: 1 });
+    }
+  }
+  return out;
+}

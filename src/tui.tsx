@@ -8,7 +8,12 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Accessor } from "solid-js";
 import type { AgyPlanEntry, AgyToolCallSummary } from "./index.ts";
-import { getSessionTraceMtime, readSessionTraces, type AgyTraceRun } from "./trace.ts";
+import {
+  collapseConsecutiveSteps,
+  getSessionTraceMtime,
+  readSessionTraces,
+  type AgyTraceRun,
+} from "./trace.ts";
 
 const PANEL_NAME = "agy-trace";
 const RECENT_STEPS_LIMIT = 15;
@@ -248,32 +253,11 @@ function truncateLine(text: string, maxChars: number): string {
   return clean.slice(0, Math.max(1, maxChars - 1)) + "…";
 }
 
-function stepIcon(status: string | undefined): string {
-  const st = (status ?? "").toLowerCase();
-  if (st === "completed" || st === "done") return "✓";
-  if (st === "failed" || st === "error" || st === "cancelled") return "✗";
-  return "›";
-}
-
 function planIcon(status: string | undefined): string {
   const st = (status ?? "").toLowerCase();
   if (st === "completed" || st === "done") return "✓";
   if (st === "in_progress" || st === "running") return "●";
   return "○";
-}
-
-function isStepError(status: string | undefined): boolean {
-  const st = (status ?? "").toLowerCase();
-  return st === "failed" || st === "error" || st === "cancelled";
-}
-
-function formatStepText(step: AgyToolCallSummary): string {
-  const title = step.title.replace(/\s+/g, " ").trim();
-  const detail = step.detail?.replace(/\s+/g, " ").trim();
-  if (!detail || detail === title) return title;
-  const prefix = detail.endsWith("…") ? detail.slice(0, -1).trim() : detail;
-  if (prefix.length > 0 && title.startsWith(prefix)) return title;
-  return `${title} — ${detail}`;
 }
 
 export default Plugin.define({
@@ -690,23 +674,36 @@ export default Plugin.define({
                                   }
                                 >
                                   {(() => {
-                                    const showingAll = createMemo(() => Boolean(showAllStepsByRun()[run.id]));
-                                    const hiddenCount = createMemo(() =>
+                                    const collapsed = createMemo(() =>
+                                      collapseConsecutiveSteps(run.toolCalls),
+                                    );
+                                    const showingAll = createMemo(() =>
+                                      Boolean(showAllStepsByRun()[run.id]),
+                                    );
+                                    const hiddenEntries = createMemo(() =>
                                       showingAll()
-                                        ? 0
-                                        : Math.max(0, run.toolCalls.length - RECENT_STEPS_LIMIT),
+                                        ? []
+                                        : collapsed().slice(
+                                            0,
+                                            Math.max(0, collapsed().length - RECENT_STEPS_LIMIT),
+                                          ),
+                                    );
+                                    const hiddenStepCount = createMemo(() =>
+                                      hiddenEntries().reduce((sum, entry) => sum + entry.count, 0),
                                     );
                                     const visibleSteps = createMemo(() =>
                                       showingAll()
-                                        ? run.toolCalls
-                                        : run.toolCalls.slice(-RECENT_STEPS_LIMIT),
+                                        ? collapsed()
+                                        : collapsed().slice(-RECENT_STEPS_LIMIT),
                                     );
-                                    const hasMore = createMemo(() => run.toolCalls.length > RECENT_STEPS_LIMIT);
+                                    const hasMore = createMemo(
+                                      () => collapsed().length > RECENT_STEPS_LIMIT,
+                                    );
                                     return (
                                       <box flexDirection="column">
                                         <text fg={ctx.theme.text.base}>
-                                          {hiddenCount() > 0
-                                            ? `Steps (latest ${RECENT_STEPS_LIMIT} of ${run.toolCalls.length} · newest at bottom)`
+                                          {hiddenStepCount() > 0
+                                            ? `Steps (latest ${RECENT_STEPS_LIMIT} of ${collapsed().length}${collapsed().length < run.toolCalls.length ? ` · ${run.toolCalls.length} total` : ""} · newest at bottom)`
                                             : `Steps (${run.toolCalls.length} · newest at bottom)`}
                                         </text>
                                         <Show when={hasMore()}>
@@ -714,22 +711,22 @@ export default Plugin.define({
                                             fg={ctx.theme.text.muted}
                                             onMouseUp={() => toggleAllSteps(run.id)}
                                           >
-                                            {hiddenCount() > 0
-                                              ? `  ... [show ${hiddenCount()} earlier ${hiddenCount() === 1 ? "step" : "steps"}] ...`
+                                            {hiddenStepCount() > 0
+                                              ? `  ... [show ${hiddenStepCount()} earlier ${hiddenStepCount() === 1 ? "step" : "steps"}] ...`
                                               : `  ... [show latest ${RECENT_STEPS_LIMIT} only] ...`}
                                           </text>
                                         </Show>
                                         <For each={visibleSteps()}>
-                                          {(step) => (
+                                          {(entry) => (
                                             <text
                                               fg={
-                                                isStepError(step.status)
+                                                entry.isError
                                                   ? ctx.theme.text.feedback.error.base
                                                   : ctx.theme.text.muted
                                               }
                                               wrapMode="word"
                                             >
-                                              {`  ${stepIcon(step.status)} ${formatStepText(step)}`}
+                                              {`  ${entry.icon} ${entry.text}${entry.count > 1 ? ` (×${entry.count})` : ""}`}
                                             </text>
                                           )}
                                         </For>

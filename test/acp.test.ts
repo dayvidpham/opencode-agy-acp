@@ -18,6 +18,7 @@ import {
   scrubSecrets,
 } from "../src/errors.ts";
 import type { OpenCodePermissionAssertInput } from "../src/permissions.ts";
+import { collapseConsecutiveSteps } from "../src/trace.ts";
 
 interface MockAcpController {
   readonly spawner: AcpSpawner;
@@ -990,5 +991,25 @@ describe("errors and markdown helpers", () => {
     const parsed = parseFrontmatterMarkdown("---\ndescription: Test cmd\n---\nRun $ARGUMENTS");
     expect(parsed.frontmatter.description).toBe("Test cmd");
     expect(buildAgyCommandPrompt(parsed.body, "fix tests")).toBe("Run fix tests");
+  });
+
+  test("collapses consecutive identical trace steps while preserving order and status changes", () => {
+    const collapsed = collapseConsecutiveSteps([
+      { id: "1", title: "pnpm test", status: "completed" },
+      { id: "2", title: "Run manage_task", status: "completed" },
+      { id: "3", title: "Run manage_task", status: "completed" },
+      { id: "4", title: "Run manage_task", status: "completed" },
+      { id: "5", title: "Run manage_task", status: "in_progress" },
+      { id: "6", title: "pnpm build", status: "in_progress" },
+      { id: "7", title: "Run manage_task", status: "completed" },
+    ]);
+
+    expect(collapsed.map((c) => `${c.icon} ${c.text}${c.count > 1 ? ` (×${c.count})` : ""}`)).toEqual([
+      "✓ pnpm test",
+      "✓ Run manage_task (×3)",
+      "› Run manage_task",
+      "› pnpm build",
+      "✓ Run manage_task",
+    ]);
   });
 });
