@@ -4,15 +4,6 @@
 
 Zero-dependency OpenCode 2.x plugin (`dayvidpham.opencode-agy-acp`) that drives the official Google Antigravity CLI (`agy acp`) over the Agent Client Protocol (ACP), bridges permission requests into OpenCode's native `ctx.permission.assert(...)` rules, and streams live step progress into the OpenCode TUI.
 
-## Why ACP instead of `agy -p` or OAuth plugins?
-
-- **No OAuth token spoofing:** Authentication stays inside the official `agy` CLI (`~/.gemini/antigravity-cli/`).
-- **Native OpenCode permissions:** ACP `session/request_permission` requests from `agy` are mapped to OpenCode's `read` / `edit` / `bash` / `webfetch` / `agy` actions and evaluated through `ctx.permission.assert(...)`, using your existing `opencode.json` rules and interactive prompts.
-- **Explicit sessions & concurrent runs:** Spawns an isolated `agy acp` subprocess per tool call so multiple `agy` agents can run concurrently (including in parallel inside OpenCode Code Mode `execute`). Omitting `session_id` always starts a fresh session; passing `session_id` explicitly continues that session via ACP `session/load` (failing loudly with `AGY_ERROR [SESSION_LOAD_FAILED]` if it cannot be loaded).
-- **Live TUI step streaming:** Exports a `./tui` OpenCode 2.x TUI plugin that renders a zero-extra-height live indicator in `prompt.footer.status` (next to subagents/shells) and a scrollable, collapsible trace panel in `session.panel` (`/agy-trace`). Uses a lightweight atomic trace store (`/tmp/opencode-agy-acp-traces/<sessionID>.json`) so live steps stream identically for both direct `agy` tool calls and nested Code Mode (`execute`) calls.
-- **Hot-reload & cancellation hygiene:** Forwards `AbortSignal` to ACP `session/cancel`, closes each subprocess in `finally`, and does not kill in-flight `agy` turns when the plugin hot-reloads.
-- **Scrubbed environment:** Passes only an explicit allowlist (`PATH`, `HOME`, `XDG_*`, `AGY_*`, `NIX_*`, locale/proxy/TLS vars) to `agy acp` so unrelated provider API keys are never leaked.
-
 ## Installation
 
 1. Ensure `agy` is installed and signed in (`agy` interactive login).
@@ -70,25 +61,25 @@ Every response (success or error, once a session exists) appends `[agy_session_i
 
 ## Prior Art & Why ACP
 
-This plugin was inspired by [`chigarow/antigravity-for-opencode`](https://github.com/chigarow/antigravity-for-opencode), which pioneered delegating scoped tasks from OpenCode to the official `agy` CLI (avoiding unofficial OAuth token plugins) and set great conventions around secret scrubbing, error classification, and `/agy` prompt hygiene.
+This plugin was inspired by [`chigarow/antigravity-for-opencode`](https://github.com/chigarow/antigravity-for-opencode), which pioneered delegating scoped tasks from OpenCode to the official `agy` CLI — keeping authentication inside `~/.gemini/antigravity-cli/` instead of handing Google OAuth tokens to unofficial third-party OAuth plugins — and set strong conventions around secret scrubbing, environment isolation, and `/agy` prompt hygiene.
 
-`opencode-agy-acp` builds on that idea by switching the transport from **one-shot headless `agy -p`** to **bidirectional `agy acp` (Agent Client Protocol)**:
+`opencode-agy-acp` builds on that foundation by switching the transport from **one-shot headless `agy -p`** to **bidirectional `agy acp` (Agent Client Protocol)**:
 
 | Capability | Headless `agy -p` (`antigravity-for-opencode`) | Bidirectional `agy acp` (`opencode-agy-acp`) |
 | --- | --- | --- |
 | **Permissions** | All-or-nothing: actions outside defaults are soft-denied unless `yolo: true` (`--dangerously-skip-permissions`) is enabled | Every ACP `session/request_permission` is bridged into OpenCode's native `ctx.permission.assert(...)` rules and interactive prompts — no `yolo` needed |
-| **Live visibility** | Black-box wait until `agy -p` exits | Streams typed ACP `tool_call`, `plan`, thought, and text events live into OpenCode's TUI (`prompt.footer.status` + `/agy-trace` panel) |
-| **Sessions & usage** | Parses `--log-file` to recover `conversationId` | First-class ACP `session/new` / `session/load` session IDs and structured token `usage` |
-| **Cancellation** | Terminates the subprocess | Sends graceful ACP `session/cancel` on `AbortSignal` before teardown |
+| **Live visibility** | Black-box wait until `agy -p` exits | Streams typed ACP `tool_call`, `plan`, thought, and text events live into OpenCode's TUI (`prompt.footer.status` + `/agy-trace` panel), including for concurrent Code Mode (`execute`) calls |
+| **Sessions & concurrency** | Parses `--log-file` to recover `conversationId`; supports implicit `--continue` | Explicit per-call ACP sessions (`session/new` / `session/load`, failing loudly with `SESSION_LOAD_FAILED`), concurrent isolated subprocesses, and structured token `usage` |
+| **Cancellation & reload** | Terminates the subprocess | Sends graceful ACP `session/cancel` on `AbortSignal`, closes each subprocess in `finally`, and leaves in-flight turns untouched on plugin hot-reload |
 | **Model selection** | Hardcoded `tier` enum that requires updates when upstream models change | Passes model IDs directly via ACP `session/set_model` |
-| **Packaging** | Dual OpenCode v1/v2 compat with `dist/` build step | OpenCode 2.x-native, zero runtime deps, no build step (direct TS/TSX hot-reload) |
+| **Environment & packaging** | Dual OpenCode v1/v2 compat with `dist/` build step | OpenCode 2.x-native, zero runtime deps, no build step (direct TS/TSX hot-reload), and scrubbed child env (`PATH`, `HOME`, `XDG_*`, `AGY_*`, `NIX_*`, proxy/TLS vars only) |
 
 If you need **OpenCode 1.x compatibility** or strict host-level `AGY_WORKSPACE_ROOT` path containment on `--add-dir`, [`chigarow/antigravity-for-opencode`](https://github.com/chigarow/antigravity-for-opencode) remains a great option. If you're on **OpenCode 2.x** and want native permission bridging, live step streaming, and structured ACP lifecycle control, `opencode-agy-acp` is built for that.
 
 ## Project Layout
 
 - `src/index.ts` — OpenCode server plugin (`agy` tool, `/agy` command, `opencode-agy-acp` skill registration)
-- `src/tui.tsx` — OpenCode `./tui` plugin (`session.composer.top` live feed, `session.panel` trace viewer, `/agy-trace`)
+- `src/tui.tsx` — OpenCode `./tui` plugin (`prompt.footer.status` live indicator, `session.panel` trace viewer, `/agy-trace`)
 - `src/acp.ts` — Zero-dependency bidirectional NDJSON JSON-RPC 2.0 ACP client + env scrubbing
 - `src/permissions.ts` — ACP `session/request_permission` → OpenCode `ctx.permission.assert(...)` bridge
 - `src/trace.ts` — Atomic per-session trace store shared between server and TUI
