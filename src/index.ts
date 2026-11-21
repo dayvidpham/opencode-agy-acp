@@ -207,8 +207,15 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
       const registration = await ctx.tool.transform((tools) => {
         tools.add({
           name: "agy",
-          description:
+          description: [
             "Delegate a coding, analysis, or verification task to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol. Reuses your authenticated `agy` session and bridges `agy` permission requests through OpenCode's native permission rules.",
+            "",
+            "Usage guidelines:",
+            "- `agy` is a full autonomous coding agent with its own workspace read/search/edit/shell tools. Delegate cohesive, goal-oriented tasks with relevant file paths and constraints rather than pasting large files.",
+            "- Explicitly state whether the task is read-only analysis or allowed to edit files/run commands.",
+            "- Ask `agy` to wait for any subagents and include a concise final summary (changed files, verification run, remaining issues), since only its final text response is returned.",
+            "- Calls block until `agy` finishes the turn (default 15m timeout; resumable via `session_id` on timeout). Omit `session_id`/`new_session` to continue the warm `agy` session for follow-ups; pass `new_session: true` when switching to an unrelated task.",
+          ].join("\n"),
           input: {
             type: "object",
             properties: {
@@ -220,12 +227,12 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               session_id: {
                 type: "string",
                 description:
-                  "Optional `agy` ACP session ID to resume (e.g., after a timeout or across OpenCode sessions).",
+                  "Optional `agy` ACP session ID to resume (e.g., from `metadata.agySessionId` after a timeout or across OpenCode sessions).",
               },
               new_session: {
                 type: "boolean",
                 description:
-                  "If true, starts a fresh `agy` ACP session instead of reusing the one mapped to this OpenCode session.",
+                  "If true, starts a fresh `agy` ACP session instead of reusing the one mapped to this OpenCode session. Use when switching to an unrelated task.",
               },
               cwd: {
                 type: "string",
@@ -235,7 +242,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               model: {
                 type: "string",
                 description:
-                  "Optional model ID to select via ACP `session/set_model` before prompting.",
+                  "Optional model ID to select via ACP `session/set_model` before prompting. Available IDs: `gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}`, `{gemini-4-argon|gemini-3.8-flash|claude-opus-5-5|claude-sonnet-5-5}-{low|medium|high}`, `gpt-oss-120b-medium`, `gemini-pro-orchestrator-neon`, `gemini-pro-orchestrator-g1-pro`.",
               },
               timeout_ms: {
                 type: "number",
