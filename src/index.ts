@@ -211,6 +211,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             "Delegate a coding, analysis, or verification task to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol. Reuses your authenticated `agy` session and bridges `agy` permission requests through OpenCode's native permission rules.",
             "",
             "Usage guidelines:",
+            "- Only invoke this tool when the user explicitly requests using `agy` / Antigravity. Do not call it proactively without an explicit user request.",
             "- `agy` is a full autonomous coding agent with its own workspace read/search/edit/shell tools. Delegate cohesive, goal-oriented tasks with relevant file paths and constraints rather than pasting large files.",
             "- Explicitly state whether the task is read-only analysis or allowed to edit files/run commands.",
             "- Ask `agy` to wait for any subagents and include a concise final summary (changed files, verification run, remaining issues), since only its final text response is returned.",
