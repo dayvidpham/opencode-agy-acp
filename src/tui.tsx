@@ -670,7 +670,16 @@ export default Plugin.define({
                                   </box>
                                 </Show>
 
-                                <Show when={run.toolCalls.length > 0}>
+                                <Show
+                                  when={run.toolCalls.length > 0}
+                                  fallback={
+                                    <Show when={run.status === "completed" || run.status === "error"}>
+                                      <text fg={ctx.theme.text.muted}>
+                                        (no step trace recorded for this run)
+                                      </text>
+                                    </Show>
+                                  }
+                                >
                                   {(() => {
                                     const showingAll = createMemo(() => Boolean(showAllStepsByRun()[run.id]));
                                     const hiddenCount = createMemo(() =>

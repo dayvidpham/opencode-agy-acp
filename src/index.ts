@@ -13,6 +13,7 @@ import {
 } from "./permissions.ts";
 import {
   defaultTraceDir,
+  readSessionTraces,
   writeSessionTraces,
   type AgyTraceRun,
 } from "./trace.ts";
@@ -396,7 +397,12 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
         if (!traceDir || !sessionID) return;
         let runs = sessionTraces.get(sessionID);
         if (!runs) {
-          runs = new Map();
+          runs = new Map(
+            readSessionTraces(sessionID, traceDir).map((existing) => [
+              existing.id,
+              existing,
+            ]),
+          );
           sessionTraces.set(sessionID, runs);
         }
         runs.set(run.id, run);
