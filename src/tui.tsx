@@ -310,12 +310,18 @@ export default Plugin.define({
     const disposePanel = ctx.ui.slot({
       append: "session.panel",
       render(input) {
+        const isActivePanel = createMemo(() => input.name === PANEL_NAME);
+        const focused = createMemo(
+          () => isActivePanel() && (input.presentation === "fullscreen" || input.focused === true),
+        );
         const allRuns = createMemo(() =>
           extractAgyRuns(ctx.data.session.message.list(input.sessionID)).reverse(),
         );
         const hasRunning = createMemo(() =>
           allRuns().some((r) => r.status === "running" || r.status === "streaming"),
         );
+
+        let scroll: { scrollBy?: (delta: number) => void; scrollTo?: (y: number) => void; scrollHeight?: number } | undefined;
 
         const [now, setNow] = createSignal(Date.now());
         createEffect(() => {
@@ -325,8 +331,93 @@ export default Plugin.define({
           onCleanup(() => clearInterval(timer));
         });
 
+        ctx.keymap.layer(() => ({
+          enabled: () => focused(),
+          priority: 10,
+          commands: [
+            {
+              bind: "f",
+              title: "Toggle fullscreen",
+              group: "Antigravity",
+              run: () => input.toggleFullscreen(),
+            },
+            {
+              bind: "q",
+              title: "Close agy trace panel",
+              group: "Antigravity",
+              run: () => input.close(),
+            },
+            {
+              bind: "escape",
+              title: "Close agy trace panel",
+              group: "Antigravity",
+              run: () => input.close(),
+            },
+            {
+              bind: "j",
+              title: "Scroll down",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(2),
+            },
+            {
+              bind: "down",
+              title: "Scroll down",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(2),
+            },
+            {
+              bind: "k",
+              title: "Scroll up",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(-2),
+            },
+            {
+              bind: "up",
+              title: "Scroll up",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(-2),
+            },
+            {
+              bind: "pagedown",
+              title: "Page down",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(12),
+            },
+            {
+              bind: "ctrl+d",
+              title: "Page down",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(12),
+            },
+            {
+              bind: "pageup",
+              title: "Page up",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(-12),
+            },
+            {
+              bind: "ctrl+u",
+              title: "Page up",
+              group: "Antigravity",
+              run: () => scroll?.scrollBy?.(-12),
+            },
+            {
+              bind: "g",
+              title: "Scroll to top",
+              group: "Antigravity",
+              run: () => scroll?.scrollTo?.(0),
+            },
+            {
+              bind: "shift+g",
+              title: "Scroll to bottom",
+              group: "Antigravity",
+              run: () => scroll?.scrollTo?.(scroll?.scrollHeight ?? 999_999),
+            },
+          ],
+        }));
+
         return (
-          <Show when={input.name === PANEL_NAME}>
+          <Show when={isActivePanel()}>
             <box
               flexDirection="column"
               flexGrow={1}
@@ -335,6 +426,7 @@ export default Plugin.define({
               paddingTop={1}
               paddingBottom={1}
               gap={1}
+              onMouseUp={() => input.focus()}
             >
               <box flexDirection="row" justifyContent="space-between" gap={1} flexShrink={0}>
                 <text fg={ctx.theme.text.base}>
@@ -342,10 +434,10 @@ export default Plugin.define({
                 </text>
                 <box flexDirection="row" gap={2} flexShrink={0}>
                   <text fg={ctx.theme.text.muted} onMouseUp={() => input.toggleFullscreen()}>
-                    {input.presentation === "fullscreen" ? "[split]" : "[fullscreen]"}
+                    {input.presentation === "fullscreen" ? "[f split]" : "[f fullscreen]"}
                   </text>
                   <text fg={ctx.theme.text.muted} onMouseUp={() => input.close()}>
-                    [close]
+                    [q/esc close]
                   </text>
                 </box>
               </box>
@@ -358,7 +450,7 @@ export default Plugin.define({
                   </text>
                 }
               >
-                <scrollbox flexGrow={1}>
+                <scrollbox flexGrow={1} ref={(el: unknown) => { scroll = el as typeof scroll; }}>
                   <box flexDirection="column" gap={1}>
                     <For each={allRuns()}>
                       {(run) => {
