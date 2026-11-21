@@ -30,9 +30,9 @@ Only use models from the **`gemini-4`** and **`claude-5-5`** families:
 
 | Model family | Effort levels | Best used for |
 | --- | --- | --- |
-| `gemini-4-hydrogen-*` | `low`, `medium`, `high`, `xhigh` | Fast execution engine: everyday coding, bulk scaffolding, test generation, and lightweight agentic/subagent work. |
-| `gemini-4-neon-*` | `low`, `medium`, `high`, `xhigh` | Sweet-spot coding & agentic model: long-running agent workflows, complex coding, debugging, and multi-step instruction following (Sonnet-class). |
-| `gemini-4-argon-*` | `low`, `medium`, `high` | Frontier reasoning model: deep architectural judgment, long-horizon projects, complex research, and hardest problem-solving (Opus-class). |
+| `gemini-4-hydrogen-*` | `low`, `medium`, `high`, `xhigh` | Fast everyday coding & agentic workhorse: bulk implementation, scaffolding, test generation, and subagent execution (Sonnet-class speed/efficiency). |
+| `gemini-4-neon-*` | `low`, `medium`, `high`, `xhigh` | Opus-class flagship coding & agentic model: complex multi-step engineering, deep debugging, and high-judgment orchestration. |
+| `gemini-4-argon-*` | `low`, `medium`, `high` | Fable-class frontier reasoning model: hardest architectural judgment, long-horizon projects, and deepest problem-solving. |
 | `claude-sonnet-5-5-*` | `low`, `medium`, `high` | Careful code reviews, correctness-focused edits, and clean multi-file refactors. |
 | `claude-opus-5-5-*` | `low`, `medium`, `high` | Hardest refactors, gnarly bugs, and second-opinion reviews on risky diffs. |
 

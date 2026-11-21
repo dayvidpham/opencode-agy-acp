@@ -342,7 +342,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               model: {
                 type: "string",
                 description:
-                  "Optional model ID to select via ACP `session/set_model` before prompting. Only use `gemini-4` and `claude-5-5` families: `gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}` (hydrogen = fast everyday executor, neon = sweet-spot coding/agentic model) or `{gemini-4-argon|claude-opus-5-5|claude-sonnet-5-5}-{low|medium|high}` (argon = frontier reasoning/architecture, sonnet = careful review/edits, opus = hardest refactors/second opinions).",
+                  "Optional model ID to select via ACP `session/set_model` before prompting. Only use `gemini-4` and `claude-5-5` families: `gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}` (hydrogen = fast everyday workhorse, neon = Opus-class flagship coding/agentic model) or `{gemini-4-argon|claude-opus-5-5|claude-sonnet-5-5}-{low|medium|high}` (argon = Fable-class frontier reasoning/architecture, sonnet = careful review/edits, opus = hardest refactors/second opinions).",
               },
               timeout_ms: {
                 type: "number",
