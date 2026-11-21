@@ -386,9 +386,6 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
         pluginOptions.traceDir === false
           ? undefined
           : (pluginOptions.traceDir ?? defaultTraceDir());
-      // Tracks active per-call AcpClient subprocesses so concurrent `agy` calls
-      // run independently and plugin shutdown cleanly reaps any in-flight turns.
-      const activeClients = new Set<AcpClient>();
       // Mirrors live per-session run state to disk so the TUI plugin sees steps
       // even when OpenCode Code Mode (`execute`) replaces `toolCtx.progress`
       // with a no-op.
@@ -481,7 +478,6 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               spawn: pluginOptions.spawn,
               env: pluginOptions.env,
             });
-            activeClients.add(client);
 
             const acc: TurnAccumulator = {
               text: "",
@@ -696,7 +692,6 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               });
             } finally {
               client.setTurnHandlers({});
-              activeClients.delete(client);
               await client.close().catch(() => {});
             }
           },
@@ -786,14 +781,14 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
         }
       }
 
+      // Only unregister tool/command/skill definitions on reload/dispose; let
+      // any in-flight `execute()` calls finish and close their own AcpClient
+      // in `finally` (or abort via `toolCtx.signal`) so hot-reloading the
+      // plugin never kills running `agy` turns mid-flight.
       return async () => {
         for (const item of disposables) {
           await item.dispose();
         }
-        await Promise.allSettled(
-          Array.from(activeClients).map((c) => c.close()),
-        );
-        activeClients.clear();
       };
     },
   };
