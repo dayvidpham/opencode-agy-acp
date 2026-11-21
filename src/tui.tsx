@@ -267,6 +267,15 @@ function isStepError(status: string | undefined): boolean {
   return st === "failed" || st === "error" || st === "cancelled";
 }
 
+function formatStepText(step: AgyToolCallSummary): string {
+  const title = step.title.replace(/\s+/g, " ").trim();
+  const detail = step.detail?.replace(/\s+/g, " ").trim();
+  if (!detail || detail === title) return title;
+  const prefix = detail.endsWith("…") ? detail.slice(0, -1).trim() : detail;
+  if (prefix.length > 0 && title.startsWith(prefix)) return title;
+  return `${title} — ${detail}`;
+}
+
 export default Plugin.define({
   id: "dayvidpham.opencode-agy-acp",
   setup(ctx) {
@@ -720,7 +729,7 @@ export default Plugin.define({
                                               }
                                               wrapMode="word"
                                             >
-                                              {`  ${stepIcon(step.status)} ${step.title}${step.detail ? ` — ${step.detail}` : ""}`}
+                                              {`  ${stepIcon(step.status)} ${formatStepText(step)}`}
                                             </text>
                                           )}
                                         </For>

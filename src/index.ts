@@ -211,6 +211,17 @@ function lastNonEmptyLine(text: string, maxChars: number): string | undefined {
   return undefined;
 }
 
+function isRedundantDetail(title: string, detail: string): boolean {
+  const normTitle = title.replace(/\s+/g, " ").trim();
+  const normDetail = detail.replace(/\s+/g, " ").trim();
+  if (!normDetail) return true;
+  if (normDetail === normTitle) return true;
+  const prefix = normDetail.endsWith("…")
+    ? normDetail.slice(0, -1).trim()
+    : normDetail;
+  return prefix.length > 0 && normTitle.startsWith(prefix);
+}
+
 function extractToolDetail(update: Record<string, unknown>): string | undefined {
   if (Array.isArray(update.locations)) {
     for (const loc of update.locations) {
@@ -314,7 +325,10 @@ export function applySessionUpdate(
             ? update.name.trim()
             : (prev?.title ?? "tool");
       const rawDetail = extractToolDetail(update) ?? prev?.detail;
-      const detail = rawDetail && rawDetail !== title ? rawDetail : undefined;
+      const detail =
+        rawDetail && !isRedundantDetail(title, rawDetail)
+          ? rawDetail
+          : undefined;
       acc.toolCalls.set(id, {
         id,
         title,
