@@ -11,6 +11,11 @@ import {
   handleAcpPermissionRequest,
   type OpenCodePermissionAssertInput,
 } from "./permissions.ts";
+import {
+  defaultTraceDir,
+  writeSessionTraces,
+  type AgyTraceRun,
+} from "./trace.ts";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const MIN_TIMEOUT_MS = 1_000;
@@ -369,6 +374,7 @@ export interface CreatePluginOptions {
   readonly args?: readonly string[];
   readonly spawn?: AcpSpawner;
   readonly env?: Record<string, string | undefined>;
+  readonly traceDir?: string | false;
 }
 
 export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
@@ -376,9 +382,29 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
     id: "opencode-agy-acp",
     setup: async (ctx: OpenCodePluginContextLike) => {
       const defaultCwd = ctx?.location?.directory || process.cwd();
+      const traceDir =
+        pluginOptions.traceDir === false
+          ? undefined
+          : (pluginOptions.traceDir ?? defaultTraceDir());
       // Tracks active per-call AcpClient subprocesses so concurrent `agy` calls
       // run independently and plugin shutdown cleanly reaps any in-flight turns.
       const activeClients = new Set<AcpClient>();
+      // Mirrors live per-session run state to disk so the TUI plugin sees steps
+      // even when OpenCode Code Mode (`execute`) replaces `toolCtx.progress`
+      // with a no-op.
+      const sessionTraces = new Map<string, Map<string, AgyTraceRun>>();
+      let runSeq = 0;
+
+      const recordTrace = (sessionID: string, run: AgyTraceRun) => {
+        if (!traceDir || !sessionID) return;
+        let runs = sessionTraces.get(sessionID);
+        if (!runs) {
+          runs = new Map();
+          sessionTraces.set(sessionID, runs);
+        }
+        runs.set(run.id, run);
+        writeSessionTraces(sessionID, Array.from(runs.values()), traceDir);
+      };
 
       const registration = await ctx.tool.transform((tools) => {
         tools.add({
@@ -446,6 +472,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             const requestedSessionId = nonEmptyString(input.session_id);
             const requestedModel = nonEmptyString(input.model);
             const startedAt = Date.now();
+            const runId = nonEmptyString(toolCtx.id) ?? `agy-${startedAt}-${++runSeq}`;
 
             const client = new AcpClient({
               binary: pluginOptions.binary,
@@ -489,11 +516,43 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             };
 
             let lastProgressAt = 0;
+            const buildTraceRun = (
+              status: AgyTraceRun["status"],
+              extra: { completedAt?: number; errorMessage?: string } = {},
+            ): AgyTraceRun => {
+              const calls = Array.from(acc.toolCalls.values());
+              return {
+                id: runId,
+                status,
+                prompt,
+                ...(agySessionId ? { agySessionId } : {}),
+                ...(requestedModel ? { model: requestedModel } : {}),
+                cwd,
+                startedAt,
+                ...(extra.completedAt !== undefined
+                  ? { completedAt: extra.completedAt }
+                  : {}),
+                updatedAt: Date.now(),
+                currentActivity: currentActivity(),
+                toolCallCount: calls.length,
+                toolCalls: calls.slice(-50),
+                plan: acc.plan.slice(0, 20),
+                latestThought: lastNonEmptyLine(acc.thoughts, 200),
+                latestText: lastNonEmptyLine(acc.text, 200),
+                charsReceived: acc.text.length,
+                ...(extra.errorMessage
+                  ? { errorMessage: extra.errorMessage }
+                  : {}),
+              };
+            };
+
             const emitProgress = async (force = false) => {
-              if (!toolCtx.progress) return;
               const now = Date.now();
               if (!force && now - lastProgressAt < 150) return;
               lastProgressAt = now;
+              const run = buildTraceRun("running");
+              recordTrace(toolCtx.sessionID, run);
+              if (!toolCtx.progress) return;
               const calls = Array.from(acc.toolCalls.values());
               await toolCtx
                 .progress({
@@ -501,22 +560,24 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
                   ...(agySessionId ? { agySessionId } : {}),
                   startedAt,
                   ...(requestedModel ? { model: requestedModel } : {}),
-                  currentActivity: currentActivity(),
+                  currentActivity: run.currentActivity,
                   toolCallCount: calls.length,
-                  toolCalls: calls.slice(-50),
+                  toolCalls: run.toolCalls,
                   recentTools: calls
                     .slice(-5)
                     .map(
                       (t) =>
                         `${t.title}${t.detail ? ` (${t.detail})` : ""}${t.status ? ` [${t.status}]` : ""}`,
                     ),
-                  plan: acc.plan.slice(0, 20),
-                  latestThought: lastNonEmptyLine(acc.thoughts, 200),
-                  latestText: lastNonEmptyLine(acc.text, 200),
+                  plan: run.plan,
+                  latestThought: run.latestThought,
+                  latestText: run.latestText,
                   charsReceived: acc.text.length,
                 })
                 .catch(() => {});
             };
+
+            recordTrace(toolCtx.sessionID, buildTraceRun("running"));
 
             try {
               await client.ensureStarted();
@@ -588,13 +649,19 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               const content = `${prefix}${body}\n\n[agy_session_id: ${agySessionId}]`;
 
               const usage = asRecord(res.raw.usage);
+              const completedAt = Date.now();
+
+              recordTrace(
+                toolCtx.sessionID,
+                buildTraceRun("completed", { completedAt }),
+              );
 
               return {
                 content,
                 metadata: {
                   agySessionId,
                   startedAt,
-                  completedAt: Date.now(),
+                  completedAt,
                   ...(requestedModel ? { model: requestedModel } : {}),
                   stopReason: res.stopReason,
                   toolCallCount: toolCalls.length,
@@ -607,6 +674,13 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             } catch (error) {
               const msg =
                 error instanceof Error ? error.message : String(error);
+              recordTrace(
+                toolCtx.sessionID,
+                buildTraceRun("error", {
+                  completedAt: Date.now(),
+                  errorMessage: msg,
+                }),
+              );
               if (msg.startsWith("AGY_ACP_CANCELLED:")) {
                 throw error;
               }

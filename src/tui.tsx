@@ -6,8 +6,9 @@
 // 2. `session.panel`: scrollable full step trace for running and completed runs.
 
 import { Plugin } from "@opencode/plugin/tui";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Accessor } from "solid-js";
 import type { AgyPlanEntry, AgyToolCallSummary } from "./index.ts";
+import { getSessionTraceMtime, readSessionTraces, type AgyTraceRun } from "./trace.ts";
 
 const PANEL_NAME = "agy-trace";
 
@@ -79,14 +80,14 @@ function parsePlan(value: unknown): AgyPlanEntry[] {
   return out;
 }
 
-function extractAgyRuns(messages: readonly unknown[]): AgyRunView[] {
+function extractAgyRunsFromMessages(messages: readonly unknown[]): AgyRunView[] {
   const runs: AgyRunView[] = [];
   for (const rawMessage of messages) {
     const msg = asRecord(rawMessage);
     if (msg?.type !== "assistant" || !Array.isArray(msg.content)) continue;
     for (const rawPart of msg.content) {
       const part = asRecord(rawPart);
-      if (part?.type !== "tool" || part.name !== "agy") continue;
+      if (part?.type !== "tool") continue;
       const state = asRecord(part.state);
       const status = state?.status;
       if (
@@ -97,32 +98,133 @@ function extractAgyRuns(messages: readonly unknown[]): AgyRunView[] {
       ) {
         continue;
       }
-      const input = asRecord(state?.input);
-      const meta = asRecord(state?.metadata) ?? {};
-      const toolCalls = parseToolCalls(meta.toolCalls);
-      const plan = parsePlan(meta.plan);
-      const errorObj = asRecord(state?.error);
 
-      runs.push({
-        id: asString(part.id) ?? `agy-${runs.length + 1}`,
-        status,
-        prompt: asString(input?.prompt) ?? "",
-        agySessionId: asString(meta.agySessionId) ?? asString(input?.session_id),
-        model: asString(meta.model) ?? asString(input?.model),
-        startedAt: asNumber(meta.startedAt),
-        completedAt: asNumber(meta.completedAt),
-        currentActivity: asString(meta.currentActivity),
-        toolCallCount: asNumber(meta.toolCallCount) ?? toolCalls.length,
-        toolCalls,
-        plan,
-        latestThought: asString(meta.latestThought),
-        latestText: asString(meta.latestText),
-        charsReceived: asNumber(meta.charsReceived) ?? 0,
-        errorMessage: asString(errorObj?.message),
-      });
+      if (part.name === "agy") {
+        const input = asRecord(state?.input);
+        const meta = asRecord(state?.metadata) ?? {};
+        const toolCalls = parseToolCalls(meta.toolCalls);
+        const plan = parsePlan(meta.plan);
+        const errorObj = asRecord(state?.error);
+
+        runs.push({
+          id: asString(part.id) ?? `agy-${runs.length + 1}`,
+          status,
+          prompt: asString(input?.prompt) ?? "",
+          agySessionId: asString(meta.agySessionId) ?? asString(input?.session_id),
+          model: asString(meta.model) ?? asString(input?.model),
+          startedAt: asNumber(meta.startedAt),
+          completedAt: asNumber(meta.completedAt),
+          currentActivity: asString(meta.currentActivity),
+          toolCallCount: asNumber(meta.toolCallCount) ?? toolCalls.length,
+          toolCalls,
+          plan,
+          latestThought: asString(meta.latestThought),
+          latestText: asString(meta.latestText),
+          charsReceived: asNumber(meta.charsReceived) ?? 0,
+          errorMessage: asString(errorObj?.message),
+        });
+        continue;
+      }
+
+      // Code Mode (`execute`) nests `agy` calls inside `state.metadata.toolCalls`.
+      if (part.name === "execute") {
+        const meta = asRecord(state?.metadata);
+        const nested = Array.isArray(meta?.toolCalls) ? meta.toolCalls : [];
+        let idx = 0;
+        for (const rawCall of nested) {
+          const call = asRecord(rawCall);
+          if (call?.tool !== "agy") continue;
+          idx += 1;
+          const callStatus =
+            call.status === "running" ||
+            call.status === "completed" ||
+            call.status === "error"
+              ? call.status
+              : status;
+          const callInput = asRecord(call.input);
+          runs.push({
+            id: `${asString(part.id) ?? "exec"}:agy:${idx}`,
+            status: callStatus,
+            prompt: asString(callInput?.prompt) ?? "",
+            agySessionId: asString(callInput?.session_id),
+            model: asString(callInput?.model),
+            toolCallCount: 0,
+            toolCalls: [],
+            plan: [],
+            charsReceived: 0,
+          });
+        }
+      }
     }
   }
   return runs;
+}
+
+function mergeAgyRuns(
+  traceRuns: readonly AgyTraceRun[],
+  messageRuns: readonly AgyRunView[],
+  sessionIdle: boolean,
+): AgyRunView[] {
+  const byId = new Map<string, AgyRunView>();
+  const tracePrompts = new Set<string>();
+
+  for (const run of traceRuns) {
+    // If the session went idle after a crash/interrupt without hitting finally,
+    // don't leave a stale "running" banner stuck above the composer.
+    const effectiveStatus =
+      sessionIdle &&
+      (run.status === "running" || run.status === "streaming") &&
+      Date.now() - run.updatedAt > 10_000
+        ? "error"
+        : run.status;
+    byId.set(run.id, {
+      ...run,
+      status: effectiveStatus,
+    });
+    if (run.prompt) tracePrompts.add(run.prompt);
+  }
+
+  for (const run of messageRuns) {
+    if (byId.has(run.id)) continue;
+    // Avoid duplicating a Code Mode `execute` synthetic entry when the live
+    // file-backed trace already captured that run's full steps.
+    if (run.id.includes(":agy:") && run.prompt && tracePrompts.has(run.prompt)) {
+      continue;
+    }
+    byId.set(run.id, run);
+  }
+
+  return Array.from(byId.values());
+}
+
+function useSessionAgyRuns(
+  sessionID: Accessor<string>,
+  messages: Accessor<readonly unknown[]>,
+  sessionStatus: Accessor<"idle" | "running">,
+): Accessor<AgyRunView[]> {
+  const [traceRuns, setTraceRuns] = createSignal<AgyTraceRun[]>([]);
+
+  createEffect(() => {
+    const sid = sessionID();
+    let lastMtime = -1;
+    const refresh = () => {
+      const mtime = getSessionTraceMtime(sid);
+      if (mtime === lastMtime) return;
+      lastMtime = mtime;
+      setTraceRuns(mtime > 0 ? readSessionTraces(sid) : []);
+    };
+    refresh();
+    const timer = setInterval(refresh, 250);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  return createMemo(() =>
+    mergeAgyRuns(
+      traceRuns(),
+      extractAgyRunsFromMessages(messages()),
+      sessionStatus() === "idle",
+    ),
+  );
 }
 
 function formatDuration(startedAt: number | undefined, endedAt: number): string {
@@ -193,8 +295,13 @@ export default Plugin.define({
     const disposeComposerTop = ctx.ui.slot({
       append: "session.composer.top",
       render(input) {
+        const allRuns = useSessionAgyRuns(
+          () => input.sessionID,
+          () => ctx.data.session.message.list(input.sessionID),
+          () => ctx.data.session.status(input.sessionID),
+        );
         const runningRuns = createMemo(() =>
-          extractAgyRuns(ctx.data.session.message.list(input.sessionID)).filter(
+          allRuns().filter(
             (run) => run.status === "running" || run.status === "streaming",
           ),
         );
@@ -314,9 +421,12 @@ export default Plugin.define({
         const focused = createMemo(
           () => isActivePanel() && (input.presentation === "fullscreen" || input.focused === true),
         );
-        const allRuns = createMemo(() =>
-          extractAgyRuns(ctx.data.session.message.list(input.sessionID)).reverse(),
+        const sessionRuns = useSessionAgyRuns(
+          () => input.sessionID,
+          () => ctx.data.session.message.list(input.sessionID),
+          () => ctx.data.session.status(input.sessionID),
         );
+        const allRuns = createMemo(() => [...sessionRuns()].reverse());
         const hasRunning = createMemo(() =>
           allRuns().some((r) => r.status === "running" || r.status === "streaming"),
         );

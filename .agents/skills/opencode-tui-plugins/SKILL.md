@@ -27,10 +27,12 @@ Distilled conventions and gotchas for writing zero-dependency OpenCode 2.x TUI p
 
 - In OpenCode's TUI (`packages/tui/src/routes/session/index.tsx`), `ToolPart` is a hardcoded `<Switch>` over built-in tools (`shell`, `read`, `edit`, `subagent`, `execute`, etc.). All plugin tools fall back to `GenericTool`.
 - `GenericTool` **ignores `props.metadata`** and hides `output` while `state.status === "running"`, showing only a spinner next to the tool name.
-- **No custom IPC is needed to stream live steps:**
+- **No custom IPC is needed for direct tool calls:**
   1. In the server plugin, call `toolCtx.progress({ ... })` during tool execution. OpenCode syncs that object into `part.state.metadata` in the TUI's reactive store.
   2. In the `./tui` plugin, reactively read `ctx.data.session.message.list(input.sessionID)` inside a `createMemo`, filter for assistant `part.type === "tool" && part.name === "<tool>"`, and render `part.state.metadata`.
-- Flush `toolCtx.progress(...)` immediately on structural transitions (tool calls, plan updates) and throttle high-frequency text/thought chunks (~150ms).
+- **Critical Code Mode (`execute`) caveat:** When a model calls your tool *inside* OpenCode's Code Mode `execute` tool (e.g. `Promise.all([tools.agy(...), tools.agy(...)])`), `packages/core/src/codemode/tool.ts` replaces the inner tool's `context.progress` with a **no-op** (`() => Effect.void`) and only records `{ tool, status, input }` on the parent `execute` part.
+  - To stream live steps from Code Mode calls too, mirror per-session run state from the server plugin to an atomic JSON file (e.g. `/tmp/<plugin>-traces/<sessionID>.json` via temp-file + `renameSync`) and poll its `mtimeMs` (~250ms) in the `./tui` plugin, merging with `execute` tool calls from `ctx.data.session.message.list(...)`.
+- Flush `toolCtx.progress(...)` (and the trace file) immediately on structural transitions (tool calls, plan updates) and throttle high-frequency text/thought chunks (~150ms).
 
 ## 3. TUI Slots (`ctx.ui.slot`)
 
