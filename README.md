@@ -31,6 +31,8 @@ Optional environment variables:
 
 ## Slash Commands & TUI Trace Panel
 
+![OpenCode agy-trace panel](docs/agy-trace-panel.png)
+
 - **`/agy <task>`** — delegates a task to the `agy` tool with structured prompt guidance.
 - **`/agy-trace`** (or `Ctrl+P` → **Toggle agy trace panel**) — opens or closes the scrollable `agy-trace` panel (`session.panel`) showing all running and completed `agy` runs in the current session. Running trajectories expand automatically; completed runs start collapsed and can be toggled individually or all at once.
 - **Live footer indicator (`prompt.footer.status`)** — appears inline in the prompt footer while one or more `agy` agents are running (e.g. `◈ 3 agy (180 steps)`) without taking extra vertical space. Clicking it opens the full trace panel.
