@@ -18,7 +18,8 @@ Nothing `agy` produces is verified. Reading diffs, checking files, and running t
 - **Give paths, not huge file dumps:** Provide exact workspace-relative or absolute paths `agy` can read directly.
 - **State edit vs. read-only intent:** Explicitly tell `agy` whether it should only analyze/review or is allowed to edit files and run commands.
 - **Define the finish line:** Specify constraints (language, style, what not to touch) and what to include in its final reply (changed files, diff/summary, verification commands run, remaining issues).
-- **Avoid leading `/` in prompts:** `agy` expands slash commands/skills when a prompt begins with `/` (or leading whitespace/newlines followed by `/`). Always start the prompt with a normal word (e.g., `Review the diff`, not `/review`).
+- **Avoid accidental leading `/` in prompts (use `/goal` intentionally):** `agy acp` interprets leading slash commands (it advertises `/goal` and `/compact`). Start normal prompts with a regular word (e.g., `Review the diff`, not `/review`), or intentionally prefix with `/goal ` when you want `agy` to push through a multi-step checklist without stopping early (pair with a generous `timeout_ms`).
+- **Let `agy` background long commands normally:** `agy`'s shell tool auto-backgrounds commands that run longer than 10s, and `agy acp` natively keeps `session/prompt` open until background tasks finish and wake `agy` back up. Do **not** tell `agy` to "wait in the foreground" or "not leave commands in the background" — that only forces it to busy-poll `manage_task` and waste turns.
 - **Wait for subagents:** If delegating complex work, ask `agy` to wait for any internal subagents before finishing so its final response contains the complete result.
 
 ## Model selection (`gemini-4` preferred; `claude-5-5` secondary)
