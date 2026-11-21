@@ -267,7 +267,7 @@ function isStepError(status: string | undefined): boolean {
 }
 
 export default Plugin.define({
-  id: "opencode-agy-acp",
+  id: "dayvidpham.opencode-agy-acp",
   setup(ctx) {
     const togglePanel = () => {
       if (ctx.ui.panel.current()?.name === PANEL_NAME) {

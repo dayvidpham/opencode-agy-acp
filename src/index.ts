@@ -379,7 +379,7 @@ export interface CreatePluginOptions {
 
 export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
   return {
-    id: "opencode-agy-acp",
+    id: "dayvidpham.opencode-agy-acp",
     setup: async (ctx: OpenCodePluginContextLike) => {
       const defaultCwd = ctx?.location?.directory || process.cwd();
       const traceDir =
