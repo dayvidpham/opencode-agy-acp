@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 // OpenCode 2.0 TUI plugin for `opencode-agy-acp`.
 //
 // Renders live-streaming `agy acp` steps from `toolCtx.progress(...)` metadata:
@@ -175,6 +176,7 @@ export default Plugin.define({
     };
 
     ctx.keymap.layer(() => ({
+      mode: "global",
       commands: [
         {
           id: "agy.trace.toggle",
