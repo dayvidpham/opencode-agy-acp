@@ -68,7 +68,6 @@ export function buildAgyCommandPrompt(
 export interface AgyToolInput {
   readonly prompt: string;
   readonly session_id?: string;
-  readonly new_session?: boolean;
   readonly cwd?: string;
   readonly model?: string;
   readonly timeout_ms?: number;
@@ -161,11 +160,19 @@ export interface AgyToolCallSummary {
   readonly title: string;
   readonly kind?: string;
   readonly status?: string;
+  readonly detail?: string;
+}
+
+export interface AgyPlanEntry {
+  readonly content: string;
+  readonly status?: string;
+  readonly priority?: string;
 }
 
 interface TurnAccumulator {
   text: string;
   thoughts: string;
+  plan: AgyPlanEntry[];
   readonly toolCalls: Map<string, AgyToolCallSummary>;
 }
 
@@ -176,15 +183,72 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim() !== "") {
+    return value.trim();
+  }
+  return undefined;
+}
+
+function truncateOneLine(text: string, maxChars: number): string {
+  const single = text.replace(/\s+/g, " ").trim();
+  if (single.length <= maxChars) return single;
+  return single.slice(0, Math.max(1, maxChars - 1)) + "…";
+}
+
+function lastNonEmptyLine(text: string, maxChars: number): string | undefined {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i]?.trim();
+    if (trimmed) return truncateOneLine(trimmed, maxChars);
+  }
+  return undefined;
+}
+
+function extractToolDetail(update: Record<string, unknown>): string | undefined {
+  if (Array.isArray(update.locations)) {
+    for (const loc of update.locations) {
+      const p = nonEmptyString(asRecord(loc)?.path);
+      if (p) return truncateOneLine(p, 120);
+    }
+  }
+  const input = asRecord(update.rawInput) ?? asRecord(update.args);
+  if (input) {
+    for (const key of [
+      "command",
+      "CommandLine",
+      "cmd",
+      "path",
+      "Path",
+      "file_path",
+      "filePath",
+      "TargetFile",
+      "AbsolutePath",
+      "pattern",
+      "query",
+      "url",
+      "Url",
+      "description",
+    ]) {
+      const val = nonEmptyString(input[key]);
+      if (val) return truncateOneLine(val, 120);
+    }
+  }
+  return undefined;
+}
+
 /**
- * Extracts text chunks and tool call progress from ACP `session/update`
- * notifications. Handles both the ACP `params.update.sessionUpdate` envelope
- * and flat `ContentBlock[]` payloads.
+ * Extracts text chunks, thoughts, plan entries, and tool call progress from
+ * ACP `session/update` notifications. Handles both the ACP
+ * `params.update.sessionUpdate` envelope and flat `ContentBlock[]` payloads.
+ *
+ * Returns `true` when a structural step update (tool call or plan change) was
+ * applied so callers can flush progress immediately.
  */
 export function applySessionUpdate(
   acc: TurnAccumulator,
   params: Record<string, unknown>,
-): void {
+): boolean {
   const update = asRecord(params.update);
 
   if (update) {
@@ -202,7 +266,7 @@ export function applySessionUpdate(
       } else if (typeof update.text === "string") {
         acc.text += update.text;
       }
-      return;
+      return false;
     }
 
     if (kind === "agent_thought_chunk") {
@@ -212,7 +276,23 @@ export function applySessionUpdate(
       } else if (typeof update.text === "string") {
         acc.thoughts += update.text;
       }
-      return;
+      return false;
+    }
+
+    if (kind === "plan" && Array.isArray(update.entries)) {
+      const entries: AgyPlanEntry[] = [];
+      for (const rawEntry of update.entries) {
+        const entry = asRecord(rawEntry);
+        const content = nonEmptyString(entry?.content);
+        if (!content) continue;
+        entries.push({
+          content: truncateOneLine(content, 160),
+          status: nonEmptyString(entry?.status),
+          priority: nonEmptyString(entry?.priority),
+        });
+      }
+      acc.plan = entries;
+      return true;
     }
 
     if (kind === "tool_call" || kind === "tool_call_update") {
@@ -221,24 +301,29 @@ export function applySessionUpdate(
           ? update.toolCallId
           : `tc-${acc.toolCalls.size + 1}`;
       const prev = acc.toolCalls.get(id);
+      const title =
+        typeof update.title === "string" && update.title.trim() !== ""
+          ? update.title.trim()
+          : typeof update.name === "string" && update.name.trim() !== ""
+            ? update.name.trim()
+            : (prev?.title ?? "tool");
+      const rawDetail = extractToolDetail(update) ?? prev?.detail;
+      const detail = rawDetail && rawDetail !== title ? rawDetail : undefined;
       acc.toolCalls.set(id, {
         id,
-        title:
-          typeof update.title === "string" && update.title.trim() !== ""
-            ? update.title
-            : typeof update.name === "string" && update.name.trim() !== ""
-              ? update.name
-              : (prev?.title ?? "tool"),
+        title,
         kind:
           typeof update.kind === "string" ? update.kind : prev?.kind,
         status:
           typeof update.status === "string" ? update.status : prev?.status,
+        ...(detail ? { detail } : {}),
       });
-      return;
+      return true;
     }
   }
 
   // Fallback: flat ContentBlock[] format (as modeled in pasture/internal/acp)
+  let structural = false;
   if (Array.isArray(params.content)) {
     for (const rawBlock of params.content) {
       const block = asRecord(rawBlock);
@@ -252,14 +337,18 @@ export function applySessionUpdate(
           typeof block.id === "string"
             ? block.id
             : `tc-${acc.toolCalls.size + 1}`;
+        const detail = extractToolDetail(block);
         acc.toolCalls.set(id, {
           id,
           title: typeof block.name === "string" ? block.name : "tool",
           status: "running",
+          ...(detail ? { detail } : {}),
         });
+        structural = true;
       }
     }
   }
+  return structural;
 }
 
 function clampTimeout(value: unknown): number {
@@ -287,34 +376,23 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
     id: "opencode-agy-acp",
     setup: async (ctx: OpenCodePluginContextLike) => {
       const defaultCwd = ctx?.location?.directory || process.cwd();
-      const client = new AcpClient({
-        binary: pluginOptions.binary,
-        args: pluginOptions.args,
-        cwd: defaultCwd,
-        spawn: pluginOptions.spawn,
-        env: pluginOptions.env,
-      });
-
-      // Maps OpenCode sessionID -> active agy ACP sessionId for warm follow-ups.
-      const sessionMap = new Map<string, string>();
-      // Tracks agy sessionIds already loaded in the current subprocess.
-      const knownAgySessions = new Set<string>();
-      // Serializes turns on the single stdio ACP subprocess so streamed updates
-      // and permission prompts always correlate to the active OpenCode tool call.
-      let turnQueue: Promise<void> = Promise.resolve();
+      // Tracks active per-call AcpClient subprocesses so concurrent `agy` calls
+      // run independently and plugin shutdown cleanly reaps any in-flight turns.
+      const activeClients = new Set<AcpClient>();
 
       const registration = await ctx.tool.transform((tools) => {
         tools.add({
           name: "agy",
           description: [
-            "Delegate a coding, analysis, or verification task to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol. Reuses your authenticated `agy` session and bridges `agy` permission requests through OpenCode's native permission rules. Load the `opencode-agy-acp` skill for full model-tier and error-recovery guidance.",
+            "Delegate a coding, analysis, or verification task to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol. Reuses your authenticated `agy` CLI login and bridges `agy` permission requests through OpenCode's native permission rules. Load the `opencode-agy-acp` skill for full model-tier and error-recovery guidance.",
             "",
             "Usage guidelines:",
             "- Only invoke this tool when the user explicitly requests using `agy` / Antigravity (or runs `/agy`). Do not call it proactively without an explicit user request.",
             "- `agy` is a full autonomous coding agent with its own workspace read/search/edit/shell tools. Delegate cohesive, goal-oriented tasks with exact file paths and constraints rather than pasting large files.",
             "- Explicitly state whether the task is read-only analysis or allowed to edit files/run commands, and start `prompt` with a normal word (never a leading `/`, which triggers `agy` slash-command expansion).",
             "- Nothing `agy` produces is verified: ask `agy` to wait for any subagents and report changed files/verification in its final reply, then inspect diffs and run tests yourself.",
-            "- Calls block until `agy` finishes the turn (default 15m timeout; on `AGY_ERROR [TIMEOUT]`, resume via `session_id` + `suggestedNextTimeoutMs`). Omit `session_id`/`new_session` for warm follow-ups; pass `new_session: true` for unrelated tasks.",
+            "- Sessions are explicit: omit `session_id` to start a fresh `agy` session; pass `session_id` (from a prior result's `[agy_session_id: ...]` or `metadata.agySessionId`) to continue that specific session. Multiple `agy` calls can run concurrently.",
+            "- Calls block until `agy` finishes the turn (default 15m timeout; on `AGY_ERROR [TIMEOUT]`, resume via `session_id` + `suggestedNextTimeoutMs`).",
           ].join("\n"),
           input: {
             type: "object",
@@ -327,17 +405,12 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               session_id: {
                 type: "string",
                 description:
-                  "Optional `agy` ACP session ID to resume (e.g., from `metadata.agySessionId` after a timeout or across OpenCode sessions).",
-              },
-              new_session: {
-                type: "boolean",
-                description:
-                  "If true, starts a fresh `agy` ACP session instead of reusing the one mapped to this OpenCode session. Use when switching to an unrelated task.",
+                  "Optional `agy` ACP session ID to continue (e.g., from a prior result's `[agy_session_id: ...]` or `metadata.agySessionId`). Omit to always start a fresh `agy` session.",
               },
               cwd: {
                 type: "string",
                 description:
-                  "Optional working directory for a new `agy` session (defaults to the current workspace directory).",
+                  "Optional working directory for the `agy` session (defaults to the current workspace directory).",
               },
               model: {
                 type: "string",
@@ -370,72 +443,108 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
                 ? input.cwd.trim()
                 : defaultCwd;
             const timeoutMs = clampTimeout(input.timeout_ms);
+            const requestedSessionId = nonEmptyString(input.session_id);
+            const requestedModel = nonEmptyString(input.model);
+            const startedAt = Date.now();
 
-            const runTurn = async () => {
+            const client = new AcpClient({
+              binary: pluginOptions.binary,
+              args: pluginOptions.args,
+              cwd,
+              spawn: pluginOptions.spawn,
+              env: pluginOptions.env,
+            });
+            activeClients.add(client);
+
+            const acc: TurnAccumulator = {
+              text: "",
+              thoughts: "",
+              plan: [],
+              toolCalls: new Map(),
+            };
+
+            let agySessionId = requestedSessionId;
+
+            const currentActivity = (): string => {
+              const calls = Array.from(acc.toolCalls.values());
+              for (let i = calls.length - 1; i >= 0; i--) {
+                const call = calls[i];
+                const st = (call?.status ?? "").toLowerCase();
+                if (
+                  call &&
+                  st !== "completed" &&
+                  st !== "done" &&
+                  st !== "failed" &&
+                  st !== "error" &&
+                  st !== "cancelled"
+                ) {
+                  return call.detail
+                    ? `${call.title} — ${call.detail}`
+                    : call.title;
+                }
+              }
+              if (acc.text.trim() !== "") return "Responding…";
+              if (acc.thoughts.trim() !== "") return "Thinking…";
+              return "Starting…";
+            };
+
+            let lastProgressAt = 0;
+            const emitProgress = async (force = false) => {
+              if (!toolCtx.progress) return;
+              const now = Date.now();
+              if (!force && now - lastProgressAt < 150) return;
+              lastProgressAt = now;
+              const calls = Array.from(acc.toolCalls.values());
+              await toolCtx
+                .progress({
+                  status: "running",
+                  ...(agySessionId ? { agySessionId } : {}),
+                  startedAt,
+                  ...(requestedModel ? { model: requestedModel } : {}),
+                  currentActivity: currentActivity(),
+                  toolCallCount: calls.length,
+                  toolCalls: calls.slice(-50),
+                  recentTools: calls
+                    .slice(-5)
+                    .map(
+                      (t) =>
+                        `${t.title}${t.detail ? ` (${t.detail})` : ""}${t.status ? ` [${t.status}]` : ""}`,
+                    ),
+                  plan: acc.plan.slice(0, 20),
+                  latestThought: lastNonEmptyLine(acc.thoughts, 200),
+                  latestText: lastNonEmptyLine(acc.text, 200),
+                  charsReceived: acc.text.length,
+                })
+                .catch(() => {});
+            };
+
+            try {
               await client.ensureStarted();
 
-              let agySessionId =
-                typeof input.session_id === "string" &&
-                input.session_id.trim() !== ""
-                  ? input.session_id.trim()
-                  : input.new_session
-                    ? undefined
-                    : sessionMap.get(toolCtx.sessionID);
-
-              if (!agySessionId) {
-                agySessionId = await client.newSession(cwd);
-                knownAgySessions.add(agySessionId);
-                sessionMap.set(toolCtx.sessionID, agySessionId);
-              } else if (!knownAgySessions.has(agySessionId)) {
+              if (requestedSessionId) {
                 try {
-                  await client.loadSession(agySessionId, cwd);
-                  knownAgySessions.add(agySessionId);
-                } catch {
-                  // If the agent does not support session/load or the old ID
-                  // expired, start a fresh session and record it.
-                  agySessionId = await client.newSession(cwd);
-                  knownAgySessions.add(agySessionId);
+                  await client.loadSession(requestedSessionId, cwd);
+                  agySessionId = requestedSessionId;
+                } catch (err) {
+                  const detail =
+                    err instanceof Error ? err.message : String(err);
+                  throw new Error(
+                    `AGY_SESSION_LOAD_FAILED: Could not load agy session "${requestedSessionId}": ${detail}`,
+                  );
                 }
-                sessionMap.set(toolCtx.sessionID, agySessionId);
+              } else {
+                agySessionId = await client.newSession(cwd);
               }
 
               let modelWarning: string | undefined;
-              if (
-                typeof input.model === "string" &&
-                input.model.trim() !== ""
-              ) {
+              if (requestedModel) {
                 try {
-                  await client.setModel(agySessionId, input.model.trim());
+                  await client.setModel(agySessionId, requestedModel);
                 } catch (err) {
                   modelWarning =
                     err instanceof Error ? err.message : String(err);
                 }
               }
-
-              const acc: TurnAccumulator = {
-                text: "",
-                thoughts: "",
-                toolCalls: new Map(),
-              };
-
-              let lastProgressAt = 0;
-              const emitProgress = async (force = false) => {
-                if (!toolCtx.progress) return;
-                const now = Date.now();
-                if (!force && now - lastProgressAt < 250) return;
-                lastProgressAt = now;
-                await toolCtx
-                  .progress({
-                    status: "running",
-                    agySessionId,
-                    toolCallCount: acc.toolCalls.size,
-                    recentTools: Array.from(acc.toolCalls.values())
-                      .slice(-5)
-                      .map((t) => `${t.title}${t.status ? ` (${t.status})` : ""}`),
-                    charsReceived: acc.text.length,
-                  })
-                  .catch(() => {});
-              };
 
               client.setTurnHandlers({
                 onUpdate: async (params) => {
@@ -446,8 +555,8 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
                   if (updateSessionId && updateSessionId !== agySessionId) {
                     return;
                   }
-                  applySessionUpdate(acc, params);
-                  await emitProgress(false);
+                  const structural = applySessionUpdate(acc, params);
+                  await emitProgress(structural);
                 },
                 onPermissionRequest: async (params) => {
                   return await handleAcpPermissionRequest(params, {
@@ -463,63 +572,38 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
 
               await emitProgress(true);
 
-              try {
-                const res = await client.prompt(agySessionId, prompt, {
-                  signal: toolCtx.signal,
-                  timeoutMs,
-                });
+              const res = await client.prompt(agySessionId, prompt, {
+                signal: toolCtx.signal,
+                timeoutMs,
+              });
 
-                const toolCalls = Array.from(acc.toolCalls.values());
-                const body = acc.text.trim()
-                  ? truncateTail(acc.text.trim(), MAX_OUTPUT_CHARS)
-                  : `(agy completed with stopReason="${res.stopReason}" and no text output)`;
+              const toolCalls = Array.from(acc.toolCalls.values());
+              const body = acc.text.trim()
+                ? truncateTail(acc.text.trim(), MAX_OUTPUT_CHARS)
+                : `(agy completed with stopReason="${res.stopReason}" and no text output)`;
 
-                const content = modelWarning
-                  ? `[Note: model override failed: ${modelWarning}]\n\n${body}`
-                  : body;
+              const prefix = modelWarning
+                ? `[Note: model override failed: ${modelWarning}]\n\n`
+                : "";
+              const content = `${prefix}${body}\n\n[agy_session_id: ${agySessionId}]`;
 
-                const usage = asRecord(res.raw.usage);
+              const usage = asRecord(res.raw.usage);
 
-                return {
-                  content,
-                  metadata: {
-                    agySessionId,
-                    stopReason: res.stopReason,
-                    toolCalls,
-                    ...(usage ? { usage } : {}),
-                    ...(modelWarning ? { modelWarning } : {}),
-                  },
-                };
-              } catch (error) {
-                const msg =
-                  error instanceof Error ? error.message : String(error);
-                if (msg.startsWith("AGY_ACP_CANCELLED:")) {
-                  throw error;
-                }
-                return formatAgyErrorResult(error, {
+              return {
+                content,
+                metadata: {
                   agySessionId,
-                  timeoutMs,
-                  maxTimeoutMs: MAX_TIMEOUT_MS,
-                  partialOutput: acc.text.trim()
-                    ? truncateTail(acc.text.trim(), 8_000)
-                    : undefined,
-                  stderrTail: client.stderrTail,
-                  toolCalls: Array.from(acc.toolCalls.values()),
-                });
-              } finally {
-                client.setTurnHandlers({});
-              }
-            };
-
-            const previous = turnQueue;
-            let releaseQueue!: () => void;
-            turnQueue = new Promise<void>((resolve) => {
-              releaseQueue = resolve;
-            });
-
-            await previous;
-            try {
-              return await runTurn();
+                  startedAt,
+                  completedAt: Date.now(),
+                  ...(requestedModel ? { model: requestedModel } : {}),
+                  stopReason: res.stopReason,
+                  toolCallCount: toolCalls.length,
+                  toolCalls,
+                  ...(acc.plan.length > 0 ? { plan: acc.plan } : {}),
+                  ...(usage ? { usage } : {}),
+                  ...(modelWarning ? { modelWarning } : {}),
+                },
+              };
             } catch (error) {
               const msg =
                 error instanceof Error ? error.message : String(error);
@@ -527,12 +611,19 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
                 throw error;
               }
               return formatAgyErrorResult(error, {
+                agySessionId,
                 timeoutMs,
                 maxTimeoutMs: MAX_TIMEOUT_MS,
+                partialOutput: acc.text.trim()
+                  ? truncateTail(acc.text.trim(), 8_000)
+                  : undefined,
                 stderrTail: client.stderrTail,
+                toolCalls: Array.from(acc.toolCalls.values()),
               });
             } finally {
-              releaseQueue();
+              client.setTurnHandlers({});
+              activeClients.delete(client);
+              await client.close().catch(() => {});
             }
           },
         });
@@ -625,7 +716,10 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
         for (const item of disposables) {
           await item.dispose();
         }
-        await client.close();
+        await Promise.allSettled(
+          Array.from(activeClients).map((c) => c.close()),
+        );
+        activeClients.clear();
       };
     },
   };

@@ -35,89 +35,97 @@ function createMockAcpServer(
 ): MockAcpController {
   const received: Array<Record<string, unknown>> = [];
   let lastEnv: Record<string, string> | undefined;
-  let stdoutController!: ReadableStreamDefaultController<Uint8Array>;
-  let stderrController!: ReadableStreamDefaultController<Uint8Array>;
-  let resolveExit!: (code: number) => void;
-  let exitCode: number | null = null;
+  let lastSend: ((msg: Record<string, unknown>) => void) | undefined;
+  let lastExit: ((code?: number) => void) | undefined;
   const encoder = new TextEncoder();
 
-  const stdout = new ReadableStream<Uint8Array>({
-    start(c) {
-      stdoutController = c;
-    },
-  });
+  const spawnOne = (): AcpProcessLike => {
+    let stdoutController!: ReadableStreamDefaultController<Uint8Array>;
+    let stderrController!: ReadableStreamDefaultController<Uint8Array>;
+    let resolveExit!: (code: number) => void;
+    let exitCode: number | null = null;
 
-  const stderr = new ReadableStream<Uint8Array>({
-    start(c) {
-      stderrController = c;
-    },
-  });
-
-  const exited = new Promise<number>((resolve) => {
-    resolveExit = resolve;
-  });
-
-  const send = (msg: Record<string, unknown>) => {
-    stdoutController.enqueue(encoder.encode(JSON.stringify(msg) + "\n"));
-  };
-
-  const exit = (code = 0) => {
-    if (exitCode !== null) return;
-    exitCode = code;
-    try {
-      stdoutController.close();
-    } catch {}
-    try {
-      stderrController.close();
-    } catch {}
-    resolveExit(code);
-  };
-
-  let stdinBuf = "";
-  const proc: AcpProcessLike = {
-    stdin: {
-      write(chunk) {
-        stdinBuf +=
-          typeof chunk === "string"
-            ? chunk
-            : new TextDecoder().decode(chunk);
-        let idx = stdinBuf.indexOf("\n");
-        while (idx !== -1) {
-          const line = stdinBuf.slice(0, idx).trim();
-          stdinBuf = stdinBuf.slice(idx + 1);
-          if (line) {
-            const parsed = JSON.parse(line) as Record<string, unknown>;
-            received.push(parsed);
-            void onMessage(parsed, send);
-          }
-          idx = stdinBuf.indexOf("\n");
-        }
-        return typeof chunk === "string" ? chunk.length : chunk.byteLength;
+    const stdout = new ReadableStream<Uint8Array>({
+      start(c) {
+        stdoutController = c;
       },
-      end() {
+    });
+
+    const stderr = new ReadableStream<Uint8Array>({
+      start(c) {
+        stderrController = c;
+      },
+    });
+
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    });
+
+    const send = (msg: Record<string, unknown>) => {
+      stdoutController.enqueue(encoder.encode(JSON.stringify(msg) + "\n"));
+    };
+
+    const exit = (code = 0) => {
+      if (exitCode !== null) return;
+      exitCode = code;
+      try {
+        stdoutController.close();
+      } catch {}
+      try {
+        stderrController.close();
+      } catch {}
+      resolveExit(code);
+    };
+
+    lastSend = send;
+    lastExit = exit;
+
+    let stdinBuf = "";
+    return {
+      stdin: {
+        write(chunk) {
+          stdinBuf +=
+            typeof chunk === "string"
+              ? chunk
+              : new TextDecoder().decode(chunk);
+          let idx = stdinBuf.indexOf("\n");
+          while (idx !== -1) {
+            const line = stdinBuf.slice(0, idx).trim();
+            stdinBuf = stdinBuf.slice(idx + 1);
+            if (line) {
+              const parsed = JSON.parse(line) as Record<string, unknown>;
+              received.push(parsed);
+              void onMessage(parsed, send);
+            }
+            idx = stdinBuf.indexOf("\n");
+          }
+          return typeof chunk === "string" ? chunk.length : chunk.byteLength;
+        },
+        end() {
+          exit(0);
+        },
+      },
+      stdout,
+      stderr,
+      exited,
+      get exitCode() {
+        return exitCode;
+      },
+      kill() {
         exit(0);
       },
-    },
-    stdout,
-    stderr,
-    exited,
-    get exitCode() {
-      return exitCode;
-    },
-    kill() {
-      exit(0);
-    },
+    };
   };
 
   return {
     spawner: (opts) => {
       lastEnv = opts.env;
-      return proc;
+      return spawnOne();
     },
     received,
     spawnedEnv: () => lastEnv,
-    send,
-    exit,
+    send: (msg) => lastSend?.(msg),
+    exit: (code = 0) => lastExit?.(code),
   };
 }
 
@@ -252,7 +260,9 @@ describe("opencode-agy-acp plugin", () => {
       },
     );
 
-    expect(result.content).toBe("Edited src/app.ts successfully.");
+    expect(result.content).toBe(
+      "Edited src/app.ts successfully.\n\n[agy_session_id: agy-sess-1]",
+    );
     expect(result.metadata?.agySessionId).toBe("agy-sess-1");
     expect(result.metadata?.stopReason).toBe("end_turn");
     expect(permissionAsserts.length).toBe(1);
@@ -351,7 +361,9 @@ describe("opencode-agy-acp plugin", () => {
       { sessionID: "oc-sess-2" },
     );
 
-    expect(result.content).toBe("Skipped command after denial.");
+    expect(result.content).toBe(
+      "Skipped command after denial.\n\n[agy_session_id: agy-sess-deny]",
+    );
     expect(permissionReply?.result).toEqual({
       outcome: { outcome: "selected", optionId: "reject_once" },
     });
@@ -521,7 +533,9 @@ describe("opencode-agy-acp plugin", () => {
       { sessionID: "oc-sess-wire" },
     );
 
-    expect(result.content).toBe("agy-probe-ok");
+    expect(result.content).toBe(
+      "agy-probe-ok\n\n[agy_session_id: 230f98dd-cc2e-419b-aefa-abc1d0677987]",
+    );
     expect(permissionAsserts[0]?.action).toBe("bash");
     expect(permissionAsserts[0]?.resources).toEqual(["echo agy-probe-ok"]);
     expect(permissionAsserts[0]?.metadata?.name).toBe("run_command");
@@ -545,8 +559,10 @@ describe("opencode-agy-acp plugin", () => {
     await dispose();
   });
 
-  test("reuses warm agy session per OpenCode sessionID and starts fresh on new_session", async () => {
+  test("starts fresh agy sessions by default, explicitly resumes session_id via session/load, and fails loudly on bad session_id", async () => {
     let newSessionCount = 0;
+    const loadedSessions: string[] = [];
+
     const mock = createMockAcpServer((msg, send) => {
       if (msg.method === "initialize") {
         send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
@@ -555,8 +571,20 @@ describe("opencode-agy-acp plugin", () => {
         send({
           jsonrpc: "2.0",
           id: msg.id,
-          result: { sessionId: `agy-warm-${newSessionCount}` },
+          result: { sessionId: `agy-fresh-${newSessionCount}` },
         });
+      } else if (msg.method === "session/load") {
+        const params = msg.params as { sessionId: string };
+        loadedSessions.push(params.sessionId);
+        if (params.sessionId === "bad-session-id") {
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: -32000, message: "Session not found" },
+          });
+        } else {
+          send({ jsonrpc: "2.0", id: msg.id, result: {} });
+        }
       } else if (msg.method === "session/prompt") {
         const params = msg.params as { sessionId: string };
         send({
@@ -602,15 +630,154 @@ describe("opencode-agy-acp plugin", () => {
 
     const first = await registeredExecute({ prompt: "one" }, { sessionID: "oc-1" });
     const second = await registeredExecute({ prompt: "two" }, { sessionID: "oc-1" });
-    const third = await registeredExecute(
-      { prompt: "three", new_session: true },
+    const resumed = await registeredExecute(
+      { prompt: "three", session_id: "agy-fresh-1" },
+      { sessionID: "oc-1" },
+    );
+    const bad = await registeredExecute(
+      { prompt: "four", session_id: "bad-session-id" },
       { sessionID: "oc-1" },
     );
 
-    expect(first.metadata?.agySessionId).toBe("agy-warm-1");
-    expect(second.metadata?.agySessionId).toBe("agy-warm-1");
-    expect(third.metadata?.agySessionId).toBe("agy-warm-2");
+    expect(first.metadata?.agySessionId).toBe("agy-fresh-1");
+    expect(second.metadata?.agySessionId).toBe("agy-fresh-2");
+    expect(resumed.metadata?.agySessionId).toBe("agy-fresh-1");
+    expect(loadedSessions).toEqual(["agy-fresh-1", "bad-session-id"]);
     expect(newSessionCount).toBe(2);
+    expect(bad.metadata?.code).toBe("SESSION_LOAD_FAILED");
+    expect(bad.content).toContain("AGY_ERROR [SESSION_LOAD_FAILED]");
+
+    await dispose();
+  });
+
+  test("runs multiple agy calls concurrently and streams rich step progress", async () => {
+    let sessionSeq = 0;
+    const pendingPrompts: Array<{
+      id: number | string;
+      sessionId: string;
+      send: (reply: Record<string, unknown>) => void;
+    }> = [];
+
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        sessionSeq += 1;
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: `agy-par-${sessionSeq}` },
+        });
+      } else if (msg.method === "session/prompt") {
+        const params = msg.params as { sessionId: string };
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: "plan",
+              entries: [
+                { content: "Inspect files", status: "in_progress" },
+                { content: "Run tests", status: "pending" },
+              ],
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: "tc-read-1",
+              title: "Read file",
+              kind: "read",
+              status: "in_progress",
+              locations: [{ path: "src/index.ts" }],
+            },
+          },
+        });
+        pendingPrompts.push({
+          id: msg.id as number | string,
+          sessionId: params.sessionId,
+          send,
+        });
+        // Only resolve once BOTH concurrent prompts are in flight simultaneously!
+        if (pendingPrompts.length === 2) {
+          for (const item of pendingPrompts) {
+            item.send({
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: {
+                sessionId: item.sessionId,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { type: "text", text: `done:${item.sessionId}` },
+                },
+              },
+            });
+            item.send({
+              jsonrpc: "2.0",
+              id: item.id,
+              result: { stopReason: "end_turn" },
+            });
+          }
+        }
+      }
+    });
+
+    let registeredExecute!: (
+      input: unknown,
+      ctx: {
+        sessionID: string;
+        progress?: (u: Readonly<Record<string, unknown>>) => Promise<void>;
+      },
+    ) => Promise<{
+      content?: string;
+      metadata?: Readonly<Record<string, unknown>>;
+    }>;
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async (fn) => {
+          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          return { dispose: async () => {} };
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin({ spawn: mock.spawner });
+    const dispose = await plugin.setup(fakeCtx);
+
+    const progress1: Array<Readonly<Record<string, unknown>>> = [];
+    const [r1, r2] = await Promise.all([
+      registeredExecute(
+        { prompt: "task 1" },
+        { sessionID: "oc-par", progress: async (u) => { progress1.push(u); } },
+      ),
+      registeredExecute({ prompt: "task 2" }, { sessionID: "oc-par" }),
+    ]);
+
+    expect(r1.metadata?.agySessionId).toBe("agy-par-1");
+    expect(r2.metadata?.agySessionId).toBe("agy-par-2");
+    const lastProgress = progress1[progress1.length - 1];
+    expect(lastProgress?.toolCalls).toEqual([
+      {
+        id: "tc-read-1",
+        title: "Read file",
+        kind: "read",
+        status: "in_progress",
+        detail: "src/index.ts",
+      },
+    ]);
+    expect(lastProgress?.plan).toEqual([
+      { content: "Inspect files", status: "in_progress", priority: undefined },
+      { content: "Run tests", status: "pending", priority: undefined },
+    ]);
 
     await dispose();
   });

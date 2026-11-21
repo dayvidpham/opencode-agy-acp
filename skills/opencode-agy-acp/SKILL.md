@@ -5,7 +5,7 @@ description: Driving the `agy` tool from `opencode-agy-acp`, which runs Google A
 
 # opencode-agy-acp
 
-`agy` delegates work to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol (ACP). Unlike headless print mode, `agy acp` keeps warm sessions per OpenCode session and bridges every tool permission request (`read`, `edit`, `bash`, `webfetch`) directly through OpenCode's native `ctx.permission.assert(...)` rules and interactive prompts.
+`agy` delegates work to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol (ACP). Unlike headless print mode, `agy acp` bridges every tool permission request (`read`, `edit`, `bash`, `webfetch`) directly through OpenCode's native `ctx.permission.assert(...)` rules and interactive prompts, streams live step progress into the OpenCode TUI, and supports concurrent runs with explicit `session_id` continuation.
 
 **Only invoke `agy` when the user explicitly requests using `agy` / Antigravity (or runs `/agy`). Do not call it proactively.**
 
@@ -38,9 +38,8 @@ Only use models from the **`gemini-4`** and **`claude-5-5`** families. **Prefer 
 
 ## Session continuity & timeouts
 
-- **Warm follow-ups:** Omit `session_id` and `new_session` to continue the active `agy` session mapped to the current OpenCode session.
-- **Unrelated tasks:** Pass `new_session: true` so prior context does not bleed into a fresh task.
-- **Resuming a specific session:** Pass `session_id` (from `metadata.agySessionId`) to resume a timed-out turn or an `agy` session from an earlier run (uses ACP `session/load`).
+- **Fresh by default:** Omit `session_id` to start a fresh `agy` session. There is no implicit warm reuse, and multiple `agy` calls can run concurrently.
+- **Continuing a specific session:** Pass `session_id` (from a prior result's `[agy_session_id: ...]` footer or `metadata.agySessionId`) to explicitly continue that `agy` session via ACP `session/load`. If `session/load` fails, the tool returns `AGY_ERROR [SESSION_LOAD_FAILED]` instead of silently starting a new session.
 - **Timeouts:** Default `timeout_ms` is 15 minutes (`900000`), max 4 hours (`14400000`). On `AGY_ERROR [TIMEOUT]`, do **not** restart from scratch — pass `session_id` from `metadata.agySessionId` and `timeout_ms` from `metadata.suggestedNextTimeoutMs` with a continuation prompt (e.g., `"Continue from where you left off and finish the task."`).
 
 ## Handling `AGY_ERROR [CODE]`
@@ -48,6 +47,7 @@ Only use models from the **`gemini-4`** and **`claude-5-5`** families. **Prefer 
 | Code | Next move |
 | --- | --- |
 | `TIMEOUT` | Resume with `session_id` (`metadata.agySessionId`) and `timeout_ms` (`metadata.suggestedNextTimeoutMs`). |
+| `SESSION_LOAD_FAILED` | Requested `session_id` could not be loaded. Verify the ID or omit `session_id` to start a fresh session. |
 | `AUTH_REQUIRED` | `agy` is not signed in. Stop and ask the user to run `agy` interactively to log in. Do not retry in a loop. |
 | `QUOTA_EXHAUSTED` | Rate limit or quota hit. Report it to the user and wait; do not retry in a loop. |
 | `MODEL_NOT_FOUND` | Selected model is unavailable for this account. Switch to another `gemini-4-*` or `claude-*-5-5-*` model (or omit `model` to use `agy`'s default). |
@@ -57,4 +57,4 @@ Only use models from the **`gemini-4`** and **`claude-5-5`** families. **Prefer 
 
 ## After `agy` returns
 
-Inspect the changed files or diff, run tests/typechecks yourself, and confirm the work actually landed as requested. Treat `agy`'s summary as a claim until verified. If something is wrong, fix it directly or send one targeted follow-up in the same warm `agy` session.
+Inspect the changed files or diff, run tests/typechecks yourself, and confirm the work actually landed as requested. Treat `agy`'s summary as a claim until verified. If something is wrong, fix it directly or send one targeted follow-up by explicitly passing `session_id` from the prior result.

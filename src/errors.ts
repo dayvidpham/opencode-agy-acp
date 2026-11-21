@@ -5,6 +5,7 @@ export type AgyErrorCode =
   | "AUTH_REQUIRED"
   | "QUOTA_EXHAUSTED"
   | "MODEL_NOT_FOUND"
+  | "SESSION_LOAD_FAILED"
   | "AGY_NOT_FOUND"
   | "INVALID_ARGUMENT"
   | "AGY_FAILED";
@@ -47,6 +48,9 @@ export function classifyAgyError(
   }
   if (rawMessage.startsWith("AGY_INVALID_ARGUMENT:")) {
     return "INVALID_ARGUMENT";
+  }
+  if (rawMessage.startsWith("AGY_SESSION_LOAD_FAILED:")) {
+    return "SESSION_LOAD_FAILED";
   }
   if (
     /\bENOENT\b/i.test(combined) ||
@@ -94,6 +98,8 @@ function nextMoveHint(
       return "Quota or rate limit reached. Report this to the user and wait for reset. Do not retry in a loop.";
     case "MODEL_NOT_FOUND":
       return "Model unavailable for this account. Pick another `gemini-4-*` or `claude-*-5-5-*` model, or omit `model` to use the default.";
+    case "SESSION_LOAD_FAILED":
+      return "The requested `session_id` could not be loaded. Verify the ID or omit `session_id` to start a fresh `agy` session.";
     case "AGY_NOT_FOUND":
       return "`agy` binary was not found on PATH (or AGY_BIN is invalid). Report this to the user; retrying will not help.";
     case "INVALID_ARGUMENT":
@@ -109,7 +115,9 @@ export function formatAgyErrorResult(
 ): FormattedAgyErrorResult {
   const code = classifyAgyError(error, ctx.stderrTail);
   const rawMessage = error instanceof Error ? error.message : String(error ?? "Unknown error");
-  const cleanMessage = scrubSecrets(rawMessage.replace(/^AGY_INVALID_ARGUMENT:\s*/, ""));
+  const cleanMessage = scrubSecrets(
+    rawMessage.replace(/^AGY_(?:INVALID_ARGUMENT|SESSION_LOAD_FAILED):\s*/, ""),
+  );
   const maxTimeoutMs = ctx.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
   const suggestedNextTimeoutMs =
     code === "TIMEOUT" && typeof ctx.timeoutMs === "number"
@@ -129,6 +137,10 @@ export function formatAgyErrorResult(
   const stderrTrimmed = ctx.stderrTail?.trim();
   if (stderrTrimmed && code !== "TIMEOUT") {
     lines.push("", "stderr tail:", scrubSecrets(stderrTrimmed.slice(-2_000)));
+  }
+
+  if (ctx.agySessionId) {
+    lines.push("", `[agy_session_id: ${ctx.agySessionId}]`);
   }
 
   return {

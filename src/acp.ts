@@ -93,10 +93,9 @@ const ALLOWED_ENV_EXACT = new Set([
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
   "NODE_EXTRA_CA_CERTS",
-  "NIX_SSL_CERT_FILE",
 ]);
 
-const ALLOWED_ENV_PREFIXES = ["LC_", "XDG_", "AGY_"];
+const ALLOWED_ENV_PREFIXES = ["LC_", "XDG_", "AGY_", "NIX_"];
 
 /**
  * Scrubs the parent OpenCode environment so unrelated provider API keys
