@@ -20,9 +20,11 @@ export interface AcpToolCallLocation {
 
 export interface AcpPermissionToolCall {
   readonly toolCallId?: string;
+  readonly name?: string;
   readonly title?: string;
   readonly kind?: string;
   readonly status?: string;
+  readonly args?: unknown;
   readonly rawInput?: unknown;
   readonly locations?: readonly AcpToolCallLocation[];
 }
@@ -81,6 +83,12 @@ function nonEmptyString(value: unknown): string | undefined {
   return undefined;
 }
 
+function extractToolInput(
+  toolCall: AcpPermissionToolCall | undefined,
+): Record<string, unknown> | undefined {
+  return asRecord(toolCall?.rawInput) ?? asRecord(toolCall?.args);
+}
+
 function extractPaths(toolCall: AcpPermissionToolCall | undefined): string[] {
   const paths: string[] = [];
   if (Array.isArray(toolCall?.locations)) {
@@ -89,7 +97,7 @@ function extractPaths(toolCall: AcpPermissionToolCall | undefined): string[] {
       if (p) paths.push(p);
     }
   }
-  const input = asRecord(toolCall?.rawInput);
+  const input = extractToolInput(toolCall);
   if (input) {
     for (const key of ["path", "Path", "file_path", "filePath", "target", "TargetFile", "AbsolutePath"]) {
       const p = nonEmptyString(input[key]);
@@ -100,7 +108,7 @@ function extractPaths(toolCall: AcpPermissionToolCall | undefined): string[] {
 }
 
 function extractCommand(toolCall: AcpPermissionToolCall | undefined): string | undefined {
-  const input = asRecord(toolCall?.rawInput);
+  const input = extractToolInput(toolCall);
   if (!input) return undefined;
   for (const key of ["command", "CommandLine", "cmd", "script"]) {
     const cmd = nonEmptyString(input[key]);
@@ -110,7 +118,7 @@ function extractCommand(toolCall: AcpPermissionToolCall | undefined): string | u
 }
 
 function extractUrl(toolCall: AcpPermissionToolCall | undefined): string | undefined {
-  const input = asRecord(toolCall?.rawInput);
+  const input = extractToolInput(toolCall);
   if (!input) return undefined;
   for (const key of ["url", "Url", "uri", "query"]) {
     const u = nonEmptyString(input[key]);
@@ -128,7 +136,11 @@ export function mapAcpToolCallToOpenCodePermission(
   toolCall: AcpPermissionToolCall | undefined,
 ): MappedOpenCodePermission {
   const kind = (toolCall?.kind ?? "").toLowerCase();
-  const title = nonEmptyString(toolCall?.title) ?? kind ?? "agy-tool";
+  const name = (toolCall?.name ?? "").toLowerCase();
+  const title =
+    nonEmptyString(toolCall?.title) ??
+    nonEmptyString(toolCall?.name) ??
+    (kind || "agy-tool");
   const paths = extractPaths(toolCall);
   const command = extractCommand(toolCall);
   const url = extractUrl(toolCall);
@@ -136,9 +148,10 @@ export function mapAcpToolCallToOpenCodePermission(
   const metadata: Record<string, unknown> = {
     source: "agy-acp",
     toolCallId: toolCall?.toolCallId,
+    name: toolCall?.name,
     kind: toolCall?.kind,
     title,
-    rawInput: toolCall?.rawInput,
+    rawInput: toolCall?.rawInput ?? toolCall?.args,
   };
 
   if (
@@ -146,6 +159,7 @@ export function mapAcpToolCallToOpenCodePermission(
     kind === "bash" ||
     kind === "shell" ||
     kind === "terminal" ||
+    name === "run_command" ||
     command !== undefined
   ) {
     return {
@@ -159,7 +173,9 @@ export function mapAcpToolCallToOpenCodePermission(
     kind === "edit" ||
     kind === "write" ||
     kind === "delete" ||
-    kind === "move"
+    kind === "move" ||
+    name === "edit_file" ||
+    name === "write_file"
   ) {
     return {
       action: "edit",
@@ -172,7 +188,10 @@ export function mapAcpToolCallToOpenCodePermission(
     kind === "read" ||
     kind === "search" ||
     kind === "glob" ||
-    kind === "grep"
+    kind === "grep" ||
+    name === "read_file" ||
+    name === "grep_search" ||
+    name === "find_by_name"
   ) {
     return {
       action: "read",
@@ -181,7 +200,12 @@ export function mapAcpToolCallToOpenCodePermission(
     };
   }
 
-  if (kind === "fetch" || kind === "web" || url !== undefined) {
+  if (
+    kind === "fetch" ||
+    kind === "web" ||
+    name === "search_web" ||
+    url !== undefined
+  ) {
     return {
       action: "webfetch",
       resources: [url ?? title],

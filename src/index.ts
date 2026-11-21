@@ -127,7 +127,9 @@ export function applySessionUpdate(
         title:
           typeof update.title === "string" && update.title.trim() !== ""
             ? update.title
-            : (prev?.title ?? "tool"),
+            : typeof update.name === "string" && update.name.trim() !== ""
+              ? update.name
+              : (prev?.title ?? "tool"),
         kind:
           typeof update.kind === "string" ? update.kind : prev?.kind,
         status:
@@ -367,12 +369,15 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
                   ? `[Note: model override failed: ${modelWarning}]\n\n${body}`
                   : body;
 
+                const usage = asRecord(res.raw.usage);
+
                 return {
                   content,
                   metadata: {
                     agySessionId,
                     stopReason: res.stopReason,
                     toolCalls,
+                    ...(usage ? { usage } : {}),
                     ...(modelWarning ? { modelWarning } : {}),
                   },
                 };

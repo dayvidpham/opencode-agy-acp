@@ -374,4 +374,296 @@ describe("opencode-agy-acp plugin", () => {
     expect((unknownReply?.error as Record<string, unknown>)?.code).toBe(-32601);
     await client.close();
   });
+
+  test("handles real agy acp 1.5.9 wire payloads (string id, allow/deny optionIds, args, usage)", async () => {
+    const permissionAsserts: OpenCodePermissionAssertInput[] = [];
+    let permissionReply: Record<string, unknown> | undefined;
+    let pendingPromptId = 0;
+
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            protocolVersion: 1,
+            agentCapabilities: { loadSession: true },
+            agentInfo: { name: "Antigravity ACP Server", version: "1.5.9" },
+          },
+        });
+      } else if (msg.method === "session/new") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            sessionId: "230f98dd-cc2e-419b-aefa-abc1d0677987",
+            models: { currentModelId: "gemini-4-neon-high", availableModels: [] },
+          },
+        });
+      } else if (msg.method === "session/prompt") {
+        pendingPromptId = msg.id as number;
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "230f98dd-cc2e-419b-aefa-abc1d0677987",
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: "call_1",
+              name: "run_command",
+              status: "pending",
+              kind: "execute",
+              title: "echo agy-probe-ok",
+              args: { CommandLine: "echo agy-probe-ok", BypassSandbox: true },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "session/request_permission",
+          params: {
+            sessionId: "230f98dd-cc2e-419b-aefa-abc1d0677987",
+            toolCall: {
+              sessionUpdate: "tool_call",
+              toolCallId: "call_1",
+              name: "run_command",
+              args: { CommandLine: "echo agy-probe-ok", BypassSandbox: true },
+              status: "pending",
+              kind: "execute",
+              title: "echo agy-probe-ok",
+              rawInput: { CommandLine: "echo agy-probe-ok", BypassSandbox: true },
+            },
+            options: [
+              { optionId: "allow", name: "Allow", kind: "allow_once" },
+              { optionId: "deny", name: "Deny", kind: "reject_once" },
+            ],
+          },
+        });
+      } else if (msg.id === "1" && msg.result) {
+        permissionReply = msg;
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "230f98dd-cc2e-419b-aefa-abc1d0677987",
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "call_1",
+              name: "run_command",
+              status: "completed",
+              kind: "execute",
+              title: "echo agy-probe-ok",
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "230f98dd-cc2e-419b-aefa-abc1d0677987",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "agy-probe-ok" },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          id: pendingPromptId,
+          result: {
+            stopReason: "end_turn",
+            usage: { inputTokens: 100, outputTokens: 12, totalTokens: 112 },
+          },
+        });
+      }
+    });
+
+    let registeredExecute!: (
+      input: unknown,
+      ctx: { sessionID: string },
+    ) => Promise<{
+      content?: string;
+      metadata?: Readonly<Record<string, unknown>>;
+    }>;
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: {
+        assert: async (input) => {
+          permissionAsserts.push(input);
+        },
+      },
+      tool: {
+        transform: async (fn) => {
+          fn({
+            add: (tool) => {
+              registeredExecute = tool.execute;
+            },
+          });
+          return { dispose: async () => {} };
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin({ spawn: mock.spawner });
+    const dispose = await plugin.setup(fakeCtx);
+    const result = await registeredExecute(
+      { prompt: "Run echo agy-probe-ok" },
+      { sessionID: "oc-sess-wire" },
+    );
+
+    expect(result.content).toBe("agy-probe-ok");
+    expect(permissionAsserts[0]?.action).toBe("bash");
+    expect(permissionAsserts[0]?.resources).toEqual(["echo agy-probe-ok"]);
+    expect(permissionAsserts[0]?.metadata?.name).toBe("run_command");
+    expect(permissionReply?.result).toEqual({
+      outcome: { outcome: "selected", optionId: "allow" },
+    });
+    expect(result.metadata?.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 12,
+      totalTokens: 112,
+    });
+    expect(result.metadata?.toolCalls).toEqual([
+      {
+        id: "call_1",
+        title: "echo agy-probe-ok",
+        kind: "execute",
+        status: "completed",
+      },
+    ]);
+
+    await dispose();
+  });
+
+  test("reuses warm agy session per OpenCode sessionID and starts fresh on new_session", async () => {
+    let newSessionCount = 0;
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        newSessionCount += 1;
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: `agy-warm-${newSessionCount}` },
+        });
+      } else if (msg.method === "session/prompt") {
+        const params = msg.params as { sessionId: string };
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `reply:${params.sessionId}` },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { stopReason: "end_turn" },
+        });
+      }
+    });
+
+    let registeredExecute!: (
+      input: unknown,
+      ctx: { sessionID: string },
+    ) => Promise<{
+      content?: string;
+      metadata?: Readonly<Record<string, unknown>>;
+    }>;
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async (fn) => {
+          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          return { dispose: async () => {} };
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin({ spawn: mock.spawner });
+    const dispose = await plugin.setup(fakeCtx);
+
+    const first = await registeredExecute({ prompt: "one" }, { sessionID: "oc-1" });
+    const second = await registeredExecute({ prompt: "two" }, { sessionID: "oc-1" });
+    const third = await registeredExecute(
+      { prompt: "three", new_session: true },
+      { sessionID: "oc-1" },
+    );
+
+    expect(first.metadata?.agySessionId).toBe("agy-warm-1");
+    expect(second.metadata?.agySessionId).toBe("agy-warm-1");
+    expect(third.metadata?.agySessionId).toBe("agy-warm-2");
+    expect(newSessionCount).toBe(2);
+
+    await dispose();
+  });
+
+  test("forwards AbortSignal to ACP session/cancel", async () => {
+    const cancelledSessions: string[] = [];
+    let pendingPromptId = 0;
+
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: "agy-cancel-1" },
+        });
+      } else if (msg.method === "session/prompt") {
+        pendingPromptId = msg.id as number;
+      } else if (msg.method === "session/cancel") {
+        const params = msg.params as { sessionId: string };
+        cancelledSessions.push(params.sessionId);
+        send({
+          jsonrpc: "2.0",
+          id: pendingPromptId,
+          error: { code: -32800, message: "Request cancelled" },
+        });
+      }
+    });
+
+    let registeredExecute!: (
+      input: unknown,
+      ctx: { sessionID: string; signal?: AbortSignal },
+    ) => Promise<{ content?: string }>;
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async (fn) => {
+          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          return { dispose: async () => {} };
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin({ spawn: mock.spawner });
+    const dispose = await plugin.setup(fakeCtx);
+
+    const controller = new AbortController();
+    const turnPromise = registeredExecute(
+      { prompt: "long running task" },
+      { sessionID: "oc-cancel", signal: controller.signal },
+    );
+
+    await new Promise((r) => setTimeout(r, 15));
+    controller.abort();
+
+    await expect(turnPromise).rejects.toThrow("AGY_ACP_CANCELLED");
+    expect(cancelledSessions).toEqual(["agy-cancel-1"]);
+
+    await dispose();
+  });
 });
