@@ -11,6 +11,7 @@ import type { AgyPlanEntry, AgyToolCallSummary } from "./index.ts";
 import { getSessionTraceMtime, readSessionTraces, type AgyTraceRun } from "./trace.ts";
 
 const PANEL_NAME = "agy-trace";
+const RECENT_STEPS_LIMIT = 15;
 
 interface AgyRunView {
   readonly id: string;
@@ -359,6 +360,7 @@ export default Plugin.define({
         // Explicit user collapse/expand overrides keyed by run.id.
         // Default: running runs are expanded, completed/errored runs are collapsed.
         const [overrides, setOverrides] = createSignal<Record<string, boolean>>({});
+        const [showAllStepsByRun, setShowAllStepsByRun] = createSignal<Record<string, boolean>>({});
         const [selectedIndex, setSelectedIndex] = createSignal(0);
 
         createEffect(() => {
@@ -379,6 +381,10 @@ export default Plugin.define({
         const toggleRun = (run: AgyRunView) => {
           const next = !isExpanded(run);
           setOverrides((prev) => ({ ...prev, [run.id]: next }));
+        };
+
+        const toggleAllSteps = (runId: string) => {
+          setShowAllStepsByRun((prev) => ({ ...prev, [runId]: !prev[runId] }));
         };
 
         const setAllExpanded = (expanded: boolean) => {
@@ -468,6 +474,15 @@ export default Plugin.define({
               title: "Expand all trajectories",
               group: "Antigravity",
               run: () => setAllExpanded(true),
+            },
+            {
+              bind: "s",
+              title: "Toggle all steps on selected trajectory",
+              group: "Antigravity",
+              run: () => {
+                const run = allRuns()[selectedIndex()];
+                if (run) toggleAllSteps(run.id);
+              },
             },
             {
               bind: "j",
@@ -656,23 +671,53 @@ export default Plugin.define({
                                 </Show>
 
                                 <Show when={run.toolCalls.length > 0}>
-                                  <box flexDirection="column">
-                                    <text fg={ctx.theme.text.base}>Steps</text>
-                                    <For each={run.toolCalls}>
-                                      {(step) => (
-                                        <text
-                                          fg={
-                                            isStepError(step.status)
-                                              ? ctx.theme.text.feedback.error.base
-                                              : ctx.theme.text.muted
-                                          }
-                                          wrapMode="word"
-                                        >
-                                          {`  ${stepIcon(step.status)} ${step.title}${step.detail ? ` — ${step.detail}` : ""}`}
+                                  {(() => {
+                                    const showingAll = createMemo(() => Boolean(showAllStepsByRun()[run.id]));
+                                    const hiddenCount = createMemo(() =>
+                                      showingAll()
+                                        ? 0
+                                        : Math.max(0, run.toolCalls.length - RECENT_STEPS_LIMIT),
+                                    );
+                                    const visibleSteps = createMemo(() =>
+                                      showingAll()
+                                        ? run.toolCalls
+                                        : run.toolCalls.slice(-RECENT_STEPS_LIMIT),
+                                    );
+                                    const hasMore = createMemo(() => run.toolCalls.length > RECENT_STEPS_LIMIT);
+                                    return (
+                                      <box flexDirection="column">
+                                        <text fg={ctx.theme.text.base}>
+                                          {hiddenCount() > 0
+                                            ? `Steps (latest ${RECENT_STEPS_LIMIT} of ${run.toolCalls.length} · newest at bottom)`
+                                            : `Steps (${run.toolCalls.length} · newest at bottom)`}
                                         </text>
-                                      )}
-                                    </For>
-                                  </box>
+                                        <Show when={hasMore()}>
+                                          <text
+                                            fg={ctx.theme.text.muted}
+                                            onMouseUp={() => toggleAllSteps(run.id)}
+                                          >
+                                            {hiddenCount() > 0
+                                              ? `  ... [show ${hiddenCount()} earlier ${hiddenCount() === 1 ? "step" : "steps"}] ...`
+                                              : `  ... [show latest ${RECENT_STEPS_LIMIT} only] ...`}
+                                          </text>
+                                        </Show>
+                                        <For each={visibleSteps()}>
+                                          {(step) => (
+                                            <text
+                                              fg={
+                                                isStepError(step.status)
+                                                  ? ctx.theme.text.feedback.error.base
+                                                  : ctx.theme.text.muted
+                                              }
+                                              wrapMode="word"
+                                            >
+                                              {`  ${stepIcon(step.status)} ${step.title}${step.detail ? ` — ${step.detail}` : ""}`}
+                                            </text>
+                                          )}
+                                        </For>
+                                      </box>
+                                    );
+                                  })()}
                                 </Show>
 
                                 <Show when={run.latestThought}>
@@ -707,7 +752,7 @@ export default Plugin.define({
               </Show>
 
               <text fg={ctx.theme.text.muted} flexShrink={0} wrapMode="none" truncate>
-                tab select · enter/click toggle · e/c expand/collapse all · j/k scroll · g/G top/bottom
+                tab select · enter/click toggle · s all steps · e/c expand/collapse all · j/k scroll
               </text>
             </box>
           </Show>

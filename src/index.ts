@@ -531,7 +531,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
                 updatedAt: Date.now(),
                 currentActivity: currentActivity(),
                 toolCallCount: calls.length,
-                toolCalls: calls.slice(-50),
+                toolCalls: calls.slice(-200),
                 plan: acc.plan.slice(0, 20),
                 latestThought: lastNonEmptyLine(acc.thoughts, 200),
                 latestText: lastNonEmptyLine(acc.text, 200),
