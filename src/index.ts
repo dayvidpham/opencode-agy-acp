@@ -3,7 +3,10 @@
 //
 // Zero runtime npm imports: runs directly on OpenCode's Bun runtime.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { AcpClient, type AcpSpawner } from "./acp.ts";
+import { formatAgyErrorResult } from "./errors.ts";
 import {
   handleAcpPermissionRequest,
   type OpenCodePermissionAssertInput,
@@ -13,6 +16,54 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours
 const MAX_OUTPUT_CHARS = 120_000;
+
+const SKILL_ID = "opencode-agy-acp";
+const SKILL_NAME = "opencode-agy-acp";
+const SKILL_FILE_PATH = fileURLToPath(
+  new URL("../skills/opencode-agy-acp/SKILL.md", import.meta.url),
+);
+const COMMAND_FILE_PATH = fileURLToPath(
+  new URL("../commands/agy.md", import.meta.url),
+);
+
+export interface ParsedMarkdownAsset {
+  readonly frontmatter: Readonly<Record<string, string>>;
+  readonly body: string;
+}
+
+export function parseFrontmatterMarkdown(markdown: string): ParsedMarkdownAsset {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  if (lines[0]?.trim() !== "---") {
+    throw new Error("Markdown asset must start with a '---' frontmatter block");
+  }
+  const closeIdx = lines.findIndex((line, i) => i > 0 && line.trim() === "---");
+  if (closeIdx === -1) {
+    throw new Error("Markdown asset frontmatter block is not closed");
+  }
+  const frontmatter: Record<string, string> = {};
+  for (let i = 1; i < closeIdx; i++) {
+    const line = lines[i]?.trim() ?? "";
+    if (!line) continue;
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const key = line.slice(0, colon).trim();
+    const value = line.slice(colon + 1).trim();
+    if (key) frontmatter[key] = value;
+  }
+  const body = lines.slice(closeIdx + 1).join("\n").trim();
+  return { frontmatter, body };
+}
+
+export function buildAgyCommandPrompt(
+  template: string,
+  userArguments: string,
+): string {
+  const trimmed = userArguments.trim();
+  const replacement = trimmed || "(No task provided — ask the user what they want delegated to `agy`.)";
+  return template.includes("$ARGUMENTS")
+    ? template.replace("$ARGUMENTS", replacement)
+    : `${template}\n\n${replacement}`;
+}
 
 export interface AgyToolInput {
   readonly prompt: string;
@@ -30,6 +81,15 @@ export interface OpenCodeToolContextLike {
   readonly id?: string;
   readonly signal?: AbortSignal;
   readonly progress?: (update: Readonly<Record<string, unknown>>) => Promise<void>;
+}
+
+export interface OpenCodeCommandInvocationLike {
+  readonly sessionID: string;
+  readonly prompt: {
+    readonly text: string;
+    readonly files?: readonly unknown[];
+  };
+  readonly delivery?: "steer" | "queue" | null;
 }
 
 export interface OpenCodePluginContextLike {
@@ -54,6 +114,45 @@ export interface OpenCodePluginContextLike {
         }) => void;
       }) => void,
     ) => Promise<{ dispose(): Promise<void> | void }>;
+  };
+  readonly command?: {
+    readonly transform: (
+      fn: (commands: {
+        add: (command: {
+          readonly name: string;
+          readonly description?: string;
+          readonly execute: (
+            input: OpenCodeCommandInvocationLike,
+          ) => Promise<void>;
+        }) => void;
+      }) => void,
+    ) => Promise<{ dispose(): Promise<void> | void }>;
+  };
+  readonly skill?: {
+    readonly transform: (
+      fn: (skills: {
+        get?: (id: string) => Record<string, unknown> | undefined;
+        add: (skill: {
+          readonly id: string;
+          readonly name: string;
+          readonly description?: string;
+          readonly path: string;
+          readonly content: string;
+        }) => void;
+        update?: (
+          id: string,
+          update: (skill: Record<string, unknown>) => void,
+        ) => void;
+      }) => void,
+    ) => Promise<{ dispose(): Promise<void> | void }>;
+  };
+  readonly session?: {
+    readonly prompt: (input: {
+      readonly sessionID: string;
+      readonly text: string;
+      readonly files?: readonly unknown[];
+      readonly delivery?: "steer" | "queue" | null;
+    }) => Promise<unknown>;
   };
 }
 
@@ -208,14 +307,14 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
         tools.add({
           name: "agy",
           description: [
-            "Delegate a coding, analysis, or verification task to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol. Reuses your authenticated `agy` session and bridges `agy` permission requests through OpenCode's native permission rules.",
+            "Delegate a coding, analysis, or verification task to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol. Reuses your authenticated `agy` session and bridges `agy` permission requests through OpenCode's native permission rules. Load the `opencode-agy-acp` skill for full model-tier and error-recovery guidance.",
             "",
             "Usage guidelines:",
-            "- Only invoke this tool when the user explicitly requests using `agy` / Antigravity. Do not call it proactively without an explicit user request.",
-            "- `agy` is a full autonomous coding agent with its own workspace read/search/edit/shell tools. Delegate cohesive, goal-oriented tasks with relevant file paths and constraints rather than pasting large files.",
-            "- Explicitly state whether the task is read-only analysis or allowed to edit files/run commands.",
-            "- Ask `agy` to wait for any subagents and include a concise final summary (changed files, verification run, remaining issues), since only its final text response is returned.",
-            "- Calls block until `agy` finishes the turn (default 15m timeout; resumable via `session_id` on timeout). Omit `session_id`/`new_session` to continue the warm `agy` session for follow-ups; pass `new_session: true` when switching to an unrelated task.",
+            "- Only invoke this tool when the user explicitly requests using `agy` / Antigravity (or runs `/agy`). Do not call it proactively without an explicit user request.",
+            "- `agy` is a full autonomous coding agent with its own workspace read/search/edit/shell tools. Delegate cohesive, goal-oriented tasks with exact file paths and constraints rather than pasting large files.",
+            "- Explicitly state whether the task is read-only analysis or allowed to edit files/run commands, and start `prompt` with a normal word (never a leading `/`, which triggers `agy` slash-command expansion).",
+            "- Nothing `agy` produces is verified: ask `agy` to wait for any subagents and report changed files/verification in its final reply, then inspect diffs and run tests yourself.",
+            "- Calls block until `agy` finishes the turn (default 15m timeout; on `AGY_ERROR [TIMEOUT]`, resume via `session_id` + `suggestedNextTimeoutMs`). Omit `session_id`/`new_session` for warm follow-ups; pass `new_session: true` for unrelated tasks.",
           ].join("\n"),
           input: {
             type: "object",
@@ -223,7 +322,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               prompt: {
                 type: "string",
                 description:
-                  "The task or question to send to Antigravity (`agy`).",
+                  "The task or question to send to Antigravity (`agy`). Start with a normal word (not `/`).",
               },
               session_id: {
                 type: "string",
@@ -243,7 +342,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               model: {
                 type: "string",
                 description:
-                  "Optional model ID to select via ACP `session/set_model` before prompting. Available IDs: `gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}`, `{gemini-4-argon|gemini-3.8-flash|claude-opus-5-5|claude-sonnet-5-5}-{low|medium|high}`, `gpt-oss-120b-medium`, `gemini-pro-orchestrator-neon`, `gemini-pro-orchestrator-g1-pro`.",
+                  "Optional model ID to select via ACP `session/set_model` before prompting. Only use `gemini-4` and `claude-5-5` families: `gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}` (neon = frontier reasoning, hydrogen = fast agentic workhorse) or `{gemini-4-argon|claude-opus-5-5|claude-sonnet-5-5}-{low|medium|high}` (argon = general coding, sonnet = careful review/edits, opus = hardest refactors/second opinions).",
               },
               timeout_ms: {
                 type: "number",
@@ -259,8 +358,10 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             const prompt =
               typeof input.prompt === "string" ? input.prompt.trim() : "";
             if (!prompt) {
-              throw new Error(
-                "agy tool requires a non-empty `prompt` string.",
+              return formatAgyErrorResult(
+                new Error(
+                  "AGY_INVALID_ARGUMENT: agy tool requires a non-empty `prompt` string.",
+                ),
               );
             }
 
@@ -392,20 +493,19 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               } catch (error) {
                 const msg =
                   error instanceof Error ? error.message : String(error);
-                if (msg.startsWith("AGY_ACP_TIMEOUT:")) {
-                  const partial = acc.text.trim()
-                    ? `\n\nPartial output so far:\n${truncateTail(acc.text.trim(), 8_000)}`
-                    : "";
-                  return {
-                    content: `${msg}\nYou can resume this session by passing session_id="${agySessionId}".${partial}`,
-                    metadata: {
-                      agySessionId,
-                      timedOut: true,
-                      toolCalls: Array.from(acc.toolCalls.values()),
-                    },
-                  };
+                if (msg.startsWith("AGY_ACP_CANCELLED:")) {
+                  throw error;
                 }
-                throw error;
+                return formatAgyErrorResult(error, {
+                  agySessionId,
+                  timeoutMs,
+                  maxTimeoutMs: MAX_TIMEOUT_MS,
+                  partialOutput: acc.text.trim()
+                    ? truncateTail(acc.text.trim(), 8_000)
+                    : undefined,
+                  stderrTail: client.stderrTail,
+                  toolCalls: Array.from(acc.toolCalls.values()),
+                });
               } finally {
                 client.setTurnHandlers({});
               }
@@ -420,6 +520,17 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             await previous;
             try {
               return await runTurn();
+            } catch (error) {
+              const msg =
+                error instanceof Error ? error.message : String(error);
+              if (msg.startsWith("AGY_ACP_CANCELLED:")) {
+                throw error;
+              }
+              return formatAgyErrorResult(error, {
+                timeoutMs,
+                maxTimeoutMs: MAX_TIMEOUT_MS,
+                stderrTail: client.stderrTail,
+              });
             } finally {
               releaseQueue();
             }
@@ -427,8 +538,93 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
         });
       });
 
+      const disposables: Array<{ dispose(): Promise<void> | void }> = [
+        registration,
+      ];
+
+      if (ctx.command?.transform && ctx.session?.prompt) {
+        try {
+          const parsedCommand = parseFrontmatterMarkdown(
+            readFileSync(COMMAND_FILE_PATH, "utf8"),
+          );
+          const sessionApi = ctx.session;
+          const commandReg = await ctx.command.transform((commands) => {
+            commands.add({
+              name: "agy",
+              description:
+                parsedCommand.frontmatter.description ||
+                "Delegate a task to Google Antigravity (`agy acp`)",
+              execute: async (invocation) => {
+                await sessionApi.prompt({
+                  sessionID: invocation.sessionID,
+                  text: buildAgyCommandPrompt(
+                    parsedCommand.body,
+                    invocation.prompt.text,
+                  ),
+                  ...(invocation.prompt.files
+                    ? { files: invocation.prompt.files }
+                    : {}),
+                  ...(invocation.delivery !== undefined
+                    ? { delivery: invocation.delivery }
+                    : {}),
+                });
+              },
+            });
+          });
+          disposables.push(commandReg);
+        } catch (err) {
+          console.warn(
+            "[opencode-agy-acp] /agy command registration skipped:",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+
+      if (ctx.skill?.transform) {
+        try {
+          const parsedSkill = parseFrontmatterMarkdown(
+            readFileSync(SKILL_FILE_PATH, "utf8"),
+          );
+          const skillDescription = parsedSkill.frontmatter.description;
+          const skillBody = parsedSkill.body;
+          const skillReg = await ctx.skill.transform((skills) => {
+            const existing = skills.get?.(SKILL_ID);
+            if (!existing) {
+              skills.add({
+                id: SKILL_ID,
+                name: SKILL_NAME,
+                description: skillDescription,
+                path: SKILL_FILE_PATH,
+                content: skillBody,
+              });
+            } else if (
+              skills.update &&
+              (existing.content !== skillBody ||
+                existing.description !== skillDescription ||
+                existing.name !== SKILL_NAME ||
+                existing.path !== SKILL_FILE_PATH)
+            ) {
+              skills.update(SKILL_ID, (s) => {
+                s.name = SKILL_NAME;
+                s.description = skillDescription;
+                s.path = SKILL_FILE_PATH;
+                s.content = skillBody;
+              });
+            }
+          });
+          disposables.push(skillReg);
+        } catch (err) {
+          console.warn(
+            "[opencode-agy-acp] skill registration skipped:",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+
       return async () => {
-        await registration.dispose();
+        for (const item of disposables) {
+          await item.dispose();
+        }
         await client.close();
       };
     },

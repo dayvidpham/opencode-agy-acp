@@ -6,9 +6,17 @@ import {
   type AcpSpawner,
 } from "../src/acp.ts";
 import {
+  buildAgyCommandPrompt,
   createAgyAcpPlugin,
+  parseFrontmatterMarkdown,
+  type OpenCodeCommandInvocationLike,
   type OpenCodePluginContextLike,
 } from "../src/index.ts";
+import {
+  classifyAgyError,
+  formatAgyErrorResult,
+  scrubSecrets,
+} from "../src/errors.ts";
 import type { OpenCodePermissionAssertInput } from "../src/permissions.ts";
 
 interface MockAcpController {
@@ -665,5 +673,155 @@ describe("opencode-agy-acp plugin", () => {
     expect(cancelledSessions).toEqual(["agy-cancel-1"]);
 
     await dispose();
+  });
+
+  test("returns structured AGY_ERROR [INVALID_ARGUMENT] on empty prompt", async () => {
+    let registeredExecute!: (
+      input: unknown,
+      ctx: { sessionID: string },
+    ) => Promise<{
+      content?: string;
+      metadata?: Readonly<Record<string, unknown>>;
+    }>;
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async (fn) => {
+          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          return { dispose: async () => {} };
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin();
+    const dispose = await plugin.setup(fakeCtx);
+    const res = await registeredExecute({ prompt: "   " }, { sessionID: "oc-empty" });
+
+    expect(res.content).toContain("AGY_ERROR [INVALID_ARGUMENT]");
+    expect(res.metadata?.error).toBe(true);
+    expect(res.metadata?.code).toBe("INVALID_ARGUMENT");
+
+    await dispose();
+  });
+
+  test("registers /agy command and opencode-agy-acp skill on OpenCode 2.x context", async () => {
+    const commands: Array<{
+      name: string;
+      description?: string;
+      execute: (input: OpenCodeCommandInvocationLike) => Promise<void>;
+    }> = [];
+    const skills = new Map<string, Record<string, unknown>>();
+    const prompted: Array<Record<string, unknown>> = [];
+    let disposedCount = 0;
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async () => ({
+          dispose: async () => {
+            disposedCount += 1;
+          },
+        }),
+      },
+      command: {
+        transform: async (fn) => {
+          fn({
+            add: (cmd) => {
+              commands.push(cmd);
+            },
+          });
+          return {
+            dispose: async () => {
+              disposedCount += 1;
+            },
+          };
+        },
+      },
+      skill: {
+        transform: async (fn) => {
+          fn({
+            get: (id) => skills.get(id),
+            add: (skill) => {
+              skills.set(skill.id, { ...skill });
+            },
+            update: (id, updater) => {
+              const cur = skills.get(id);
+              if (cur) updater(cur);
+            },
+          });
+          return {
+            dispose: async () => {
+              disposedCount += 1;
+            },
+          };
+        },
+      },
+      session: {
+        prompt: async (input) => {
+          prompted.push(input as unknown as Record<string, unknown>);
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin();
+    const dispose = await plugin.setup(fakeCtx);
+
+    expect(commands.length).toBe(1);
+    expect(commands[0]?.name).toBe("agy");
+    await commands[0]!.execute({
+      sessionID: "oc-cmd-1",
+      prompt: { text: "Review src/acp.ts", files: [{ uri: "file:///tmp/a.ts" }] },
+      delivery: "steer",
+    });
+
+    expect(prompted.length).toBe(1);
+    expect(prompted[0]?.sessionID).toBe("oc-cmd-1");
+    expect(String(prompted[0]?.text)).toContain("Review src/acp.ts");
+    expect(String(prompted[0]?.text)).toContain("gemini-4");
+    expect(String(prompted[0]?.text)).not.toContain("flash-3.8");
+    expect(prompted[0]?.delivery).toBe("steer");
+
+    const skill = skills.get("opencode-agy-acp");
+    expect(skill).toBeDefined();
+    expect(skill?.name).toBe("opencode-agy-acp");
+    expect(String(skill?.content)).not.toContain("---\nname:");
+    expect(String(skill?.content)).toContain("gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}");
+    expect(String(skill?.content)).not.toContain("flash-3.8");
+
+    await dispose();
+    expect(disposedCount).toBe(3);
+  });
+});
+
+describe("errors and markdown helpers", () => {
+  test("classifies structured AGY_ERROR codes and scrubs secrets", () => {
+    expect(classifyAgyError(new Error("AGY_ACP_TIMEOUT: prompt exceeded 1000ms"))).toBe("TIMEOUT");
+    expect(classifyAgyError(new Error("spawn agy ENOENT"))).toBe("AGY_NOT_FOUND");
+    expect(classifyAgyError(new Error("401 Unauthenticated"))).toBe("AUTH_REQUIRED");
+    expect(classifyAgyError(new Error("429 RESOURCE_EXHAUSTED quota"))).toBe("QUOTA_EXHAUSTED");
+    expect(classifyAgyError(new Error("Unknown model foo"))).toBe("MODEL_NOT_FOUND");
+    expect(classifyAgyError(new Error("something else"))).toBe("AGY_FAILED");
+
+    const timeoutRes = formatAgyErrorResult(
+      new Error("AGY_ACP_TIMEOUT: prompt exceeded 60000ms (session_id=s-1)"),
+      { agySessionId: "s-1", timeoutMs: 60_000, partialOutput: "halfway done" },
+    );
+    expect(timeoutRes.content).toContain("AGY_ERROR [TIMEOUT]");
+    expect(timeoutRes.content).toContain('session_id="s-1"');
+    expect(timeoutRes.metadata.suggestedNextTimeoutMs).toBe(30 * 60 * 1000);
+    expect(timeoutRes.metadata.timedOut).toBe(true);
+
+    expect(scrubSecrets("Authorization: Bearer ya29.supersecretvalue123456")).toBe(
+      "Authorization: Bearer [REDACTED]",
+    );
+  });
+
+  test("parses frontmatter markdown and substitutes $ARGUMENTS", () => {
+    const parsed = parseFrontmatterMarkdown("---\ndescription: Test cmd\n---\nRun $ARGUMENTS");
+    expect(parsed.frontmatter.description).toBe("Test cmd");
+    expect(buildAgyCommandPrompt(parsed.body, "fix tests")).toBe("Run fix tests");
   });
 });
