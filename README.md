@@ -68,6 +68,23 @@ Every response (success or error, once a session exists) appends `[agy_session_i
 
 `TIMEOUT`, `SESSION_LOAD_FAILED`, `AUTH_REQUIRED`, `QUOTA_EXHAUSTED`, `MODEL_NOT_FOUND`, `AGY_NOT_FOUND`, `INVALID_ARGUMENT`, `AGY_FAILED`.
 
+## Prior Art & Why ACP
+
+This plugin was inspired by [`chigarow/antigravity-for-opencode`](https://github.com/chigarow/antigravity-for-opencode), which pioneered delegating scoped tasks from OpenCode to the official `agy` CLI (avoiding unofficial OAuth token plugins) and set great conventions around secret scrubbing, error classification, and `/agy` prompt hygiene.
+
+`opencode-agy-acp` builds on that idea by switching the transport from **one-shot headless `agy -p`** to **bidirectional `agy acp` (Agent Client Protocol)**:
+
+| Capability | Headless `agy -p` (`antigravity-for-opencode`) | Bidirectional `agy acp` (`opencode-agy-acp`) |
+| --- | --- | --- |
+| **Permissions** | All-or-nothing: actions outside defaults are soft-denied unless `yolo: true` (`--dangerously-skip-permissions`) is enabled | Every ACP `session/request_permission` is bridged into OpenCode's native `ctx.permission.assert(...)` rules and interactive prompts — no `yolo` needed |
+| **Live visibility** | Black-box wait until `agy -p` exits | Streams typed ACP `tool_call`, `plan`, thought, and text events live into OpenCode's TUI (`prompt.footer.status` + `/agy-trace` panel) |
+| **Sessions & usage** | Parses `--log-file` to recover `conversationId` | First-class ACP `session/new` / `session/load` session IDs and structured token `usage` |
+| **Cancellation** | Terminates the subprocess | Sends graceful ACP `session/cancel` on `AbortSignal` before teardown |
+| **Model selection** | Hardcoded `tier` enum that requires updates when upstream models change | Passes model IDs directly via ACP `session/set_model` |
+| **Packaging** | Dual OpenCode v1/v2 compat with `dist/` build step | OpenCode 2.x-native, zero runtime deps, no build step (direct TS/TSX hot-reload) |
+
+If you need **OpenCode 1.x compatibility** or strict host-level `AGY_WORKSPACE_ROOT` path containment on `--add-dir`, [`chigarow/antigravity-for-opencode`](https://github.com/chigarow/antigravity-for-opencode) remains a great option. If you're on **OpenCode 2.x** and want native permission bridging, live step streaming, and structured ACP lifecycle control, `opencode-agy-acp` is built for that.
+
 ## Project Layout
 
 - `src/index.ts` — OpenCode server plugin (`agy` tool, `/agy` command, `opencode-agy-acp` skill registration)
