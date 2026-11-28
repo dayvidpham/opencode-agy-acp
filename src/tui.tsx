@@ -3,24 +3,37 @@
 //
 // Renders live-streaming `agy acp` steps from the per-session trace store:
 // 1. `prompt.footer.status`: compact single-line live indicator (0 extra vertical height).
-// 2. `session.panel`: scrollable, collapsible full step trace (`/agy-trace`).
+// 2. `session.panel`: scrollable, collapsible full step trace (`/agy-trace`) with
+//    live backgrounding (`b`) and cancellation (`x`) controls.
 
 import { Plugin } from "@opencode/plugin/tui";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Accessor } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  onCleanup,
+  Show,
+  type Accessor,
+} from "solid-js";
 import type { AgyPlanEntry, AgyToolCallSummary } from "./index.ts";
 import {
   collapseConsecutiveSteps,
   getSessionTraceMtime,
   readSessionTraces,
+  requestRunControl,
   type AgyTraceRun,
+  type AgyTraceStatus,
 } from "./trace.ts";
 
 const PANEL_NAME = "agy-trace";
 const RECENT_STEPS_LIMIT = 15;
+const STALE_ZOMBIE_MS = 15_000;
 
 interface AgyRunView {
   readonly id: string;
-  readonly status: "streaming" | "running" | "completed" | "error";
+  readonly status: AgyTraceStatus;
+  readonly background?: boolean;
   readonly prompt: string;
   readonly agySessionId?: string;
   readonly model?: string;
@@ -49,6 +62,10 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isRunningStatus(status: AgyTraceStatus): boolean {
+  return status === "running" || status === "streaming";
 }
 
 function parseToolCalls(value: unknown): AgyToolCallSummary[] {
@@ -111,10 +128,19 @@ function extractAgyRunsFromMessages(messages: readonly unknown[]): AgyRunView[] 
         const toolCalls = parseToolCalls(meta.toolCalls);
         const plan = parsePlan(meta.plan);
         const errorObj = asRecord(state?.error);
+        const background =
+          meta.background === true || input?.background === true;
+        const effectivePartStatus: AgyTraceStatus =
+          meta.cancelled === true
+            ? "cancelled"
+            : meta.error === true
+              ? "error"
+              : status;
 
         runs.push({
-          id: asString(part.id) ?? `agy-${runs.length + 1}`,
-          status,
+          id: asString(meta.jobId) ?? asString(part.id) ?? `agy-${runs.length + 1}`,
+          status: effectivePartStatus,
+          ...(background ? { background: true } : {}),
           prompt: asString(input?.prompt) ?? "",
           agySessionId: asString(meta.agySessionId) ?? asString(input?.session_id),
           model: asString(meta.model) ?? asString(input?.model),
@@ -141,7 +167,7 @@ function extractAgyRunsFromMessages(messages: readonly unknown[]): AgyRunView[] 
           const call = asRecord(rawCall);
           if (call?.tool !== "agy") continue;
           idx += 1;
-          const callStatus =
+          const callStatus: AgyTraceStatus =
             call.status === "running" ||
             call.status === "completed" ||
             call.status === "error"
@@ -151,6 +177,7 @@ function extractAgyRunsFromMessages(messages: readonly unknown[]): AgyRunView[] 
           runs.push({
             id: `${asString(part.id) ?? "exec"}:agy:${idx}`,
             status: callStatus,
+            ...(callInput?.background === true ? { background: true } : {}),
             prompt: asString(callInput?.prompt) ?? "",
             agySessionId: asString(callInput?.session_id),
             model: asString(callInput?.model),
@@ -175,12 +202,13 @@ function mergeAgyRuns(
   const tracePrompts = new Set<string>();
 
   for (const run of traceRuns) {
-    // If the session went idle after a crash/interrupt without hitting finally,
-    // don't leave a stale "running" banner stuck above the composer.
-    const effectiveStatus =
+    // Active server runs refresh `updatedAt` via a 2.5s heartbeat even when the
+    // parent OpenCode session is idle (e.g. detached background runs). Only age
+    // out genuinely orphaned entries if the server crashed without `finally`.
+    const effectiveStatus: AgyTraceStatus =
       sessionIdle &&
-      (run.status === "running" || run.status === "streaming") &&
-      Date.now() - run.updatedAt > 10_000
+      isRunningStatus(run.status) &&
+      Date.now() - run.updatedAt > STALE_ZOMBIE_MS
         ? "error"
         : run.status;
     byId.set(run.id, {
@@ -295,22 +323,28 @@ export default Plugin.define({
           () => (input.sessionID ? ctx.data.session.status(input.sessionID) : "idle"),
         );
         const runningRuns = createMemo(() =>
-          allRuns().filter(
-            (run) => run.status === "running" || run.status === "streaming",
-          ),
+          allRuns().filter((run) => isRunningStatus(run.status)),
         );
         const [hovered, setHovered] = createSignal(false);
 
         const summary = createMemo(() => {
           const active = runningRuns();
           if (active.length === 0) return "";
+          const bgCount = active.filter((r) => r.background).length;
           if (active.length === 1) {
             const run = active[0]!;
-            const steps = run.toolCallCount > 0 ? ` (${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"})` : "";
-            return `◈ 1 agy${steps} · `;
+            const bgTag = run.background ? " bg" : "";
+            const steps =
+              run.toolCallCount > 0
+                ? ` (${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"})`
+                : "";
+            return `◈ 1 agy${bgTag}${steps} · `;
           }
           const totalSteps = active.reduce((acc, r) => acc + r.toolCallCount, 0);
-          return `◈ ${active.length} agy${totalSteps > 0 ? ` (${totalSteps} steps)` : ""} · `;
+          const details: string[] = [];
+          if (bgCount > 0) details.push(`${bgCount} bg`);
+          if (totalSteps > 0) details.push(`${totalSteps} steps`);
+          return `◈ ${active.length} agy${details.length > 0 ? ` (${details.join(" · ")})` : ""} · `;
         });
 
         return (
@@ -338,7 +372,9 @@ export default Plugin.define({
       render(input) {
         const isActivePanel = createMemo(() => input.name === PANEL_NAME);
         const focused = createMemo(
-          () => isActivePanel() && (input.presentation === "fullscreen" || input.focused === true),
+          () =>
+            isActivePanel() &&
+            (input.presentation === "fullscreen" || input.focused === true),
         );
         const sessionRuns = useSessionAgyRuns(
           () => input.sessionID,
@@ -347,28 +383,51 @@ export default Plugin.define({
         );
         const allRuns = createMemo(() => [...sessionRuns()].reverse());
         const hasRunning = createMemo(() =>
-          allRuns().some((r) => r.status === "running" || r.status === "streaming"),
+          allRuns().some((r) => isRunningStatus(r.status)),
         );
 
         // Explicit user collapse/expand overrides keyed by run.id.
-        // Default: running runs are expanded, completed/errored runs are collapsed.
+        // Default: running runs are expanded, settled runs are collapsed.
         const [overrides, setOverrides] = createSignal<Record<string, boolean>>({});
-        const [showAllStepsByRun, setShowAllStepsByRun] = createSignal<Record<string, boolean>>({});
+        const [showAllStepsByRun, setShowAllStepsByRun] = createSignal<
+          Record<string, boolean>
+        >({});
+        const [pendingControl, setPendingControl] = createSignal<
+          Record<string, "cancelling" | "backgrounding">
+        >({});
         const [selectedIndex, setSelectedIndex] = createSignal(0);
 
         createEffect(() => {
-          const count = allRuns().length;
+          const runs = allRuns();
+          const count = runs.length;
           if (count === 0) {
             setSelectedIndex(0);
           } else if (selectedIndex() >= count) {
             setSelectedIndex(count - 1);
           }
+
+          // Clear optimistic control badges once the trace reflects the state change.
+          const pending = pendingControl();
+          let changed = false;
+          const next = { ...pending };
+          for (const run of runs) {
+            const cur = next[run.id];
+            if (!cur) continue;
+            if (
+              !isRunningStatus(run.status) ||
+              (cur === "backgrounding" && run.background)
+            ) {
+              delete next[run.id];
+              changed = true;
+            }
+          }
+          if (changed) setPendingControl(next);
         });
 
         const isExpanded = (run: AgyRunView): boolean => {
           const override = overrides()[run.id];
           if (override !== undefined) return override;
-          return run.status === "running" || run.status === "streaming";
+          return isRunningStatus(run.status);
         };
 
         const toggleRun = (run: AgyRunView) => {
@@ -388,13 +447,31 @@ export default Plugin.define({
           setOverrides(next);
         };
 
+        const cancelRun = (run: AgyRunView | undefined) => {
+          if (!run || !isRunningStatus(run.status)) return;
+          setPendingControl((prev) => ({ ...prev, [run.id]: "cancelling" }));
+          requestRunControl(input.sessionID, run.id, "cancel");
+        };
+
+        const backgroundRun = (run: AgyRunView | undefined) => {
+          if (!run || !isRunningStatus(run.status) || run.background) return;
+          setPendingControl((prev) => ({ ...prev, [run.id]: "backgrounding" }));
+          requestRunControl(input.sessionID, run.id, "background");
+        };
+
         const moveSelection = (delta: number) => {
           const count = allRuns().length;
           if (count === 0) return;
           setSelectedIndex((idx) => (idx + delta + count) % count);
         };
 
-        let scroll: { scrollBy?: (delta: number) => void; scrollTo?: (y: number) => void; scrollHeight?: number } | undefined;
+        let scroll:
+          | {
+              scrollBy?: (delta: number) => void;
+              scrollTo?: (y: number) => void;
+              scrollHeight?: number;
+            }
+          | undefined;
 
         const [now, setNow] = createSignal(Date.now());
         createEffect(() => {
@@ -455,6 +532,18 @@ export default Plugin.define({
                 const run = allRuns()[selectedIndex()];
                 if (run) toggleRun(run);
               },
+            },
+            {
+              bind: "x",
+              title: "Cancel selected running trajectory",
+              group: "Antigravity",
+              run: () => cancelRun(allRuns()[selectedIndex()]),
+            },
+            {
+              bind: "b",
+              title: "Move selected trajectory to background",
+              group: "Antigravity",
+              run: () => backgroundRun(allRuns()[selectedIndex()]),
             },
             {
               bind: "c",
@@ -580,7 +669,12 @@ export default Plugin.define({
                   </text>
                 }
               >
-                <scrollbox flexGrow={1} ref={(el: unknown) => { scroll = el as typeof scroll; }}>
+                <scrollbox
+                  flexGrow={1}
+                  ref={(el: unknown) => {
+                    scroll = el as typeof scroll;
+                  }}
+                >
                   <box flexDirection="column" gap={1}>
                     <For each={allRuns()}>
                       {(run, index) => {
@@ -589,18 +683,29 @@ export default Plugin.define({
                         );
                         const expanded = createMemo(() => isExpanded(run));
                         const selected = createMemo(() => index() === selectedIndex());
+                        const pending = createMemo(() => pendingControl()[run.id]);
                         const statusGlyph = createMemo(() =>
-                          run.status === "running" || run.status === "streaming"
+                          isRunningStatus(run.status)
                             ? "●"
                             : run.status === "completed"
                               ? "✓"
-                              : "✗",
+                              : run.status === "cancelled"
+                                ? "⊘"
+                                : "✗",
                         );
+                        const statusLabel = createMemo(() => {
+                          const p = pending();
+                          if (p === "cancelling") return "cancelling…";
+                          if (p === "backgrounding") return "backgrounding…";
+                          return run.background ? `${run.status} (bg)` : run.status;
+                        });
                         return (
                           <box
                             flexDirection="column"
                             border={["left"]}
-                            borderColor={selected() ? ctx.theme.text.base : ctx.theme.border.base}
+                            borderColor={
+                              selected() ? ctx.theme.text.base : ctx.theme.border.base
+                            }
                             backgroundColor={ctx.theme.background.raised.base}
                             paddingLeft={2}
                             paddingRight={2}
@@ -608,34 +713,82 @@ export default Plugin.define({
                             paddingBottom={1}
                             gap={expanded() ? 1 : 0}
                           >
-                            <box
-                              flexDirection="column"
-                              onMouseUp={() => {
-                                setSelectedIndex(index());
-                                toggleRun(run);
-                              }}
-                            >
-                              <text
-                                fg={
-                                  run.status === "error"
-                                    ? ctx.theme.text.feedback.error.base
-                                    : ctx.theme.text.base
-                                }
-                                wrapMode="none"
-                                truncate
+                            <box flexDirection="column">
+                              <box
+                                flexDirection="row"
+                                justifyContent="space-between"
+                                gap={2}
                               >
-                                {`${expanded() ? "▾" : "▸"} ${statusGlyph()} ${run.status}${run.model ? ` · ${run.model}` : ""}${duration() ? ` · ${duration()}` : ""}${run.toolCallCount > 0 ? ` · ${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"}` : ""}${run.agySessionId ? ` · ${shortId(run.agySessionId)}` : ""}`}
-                              </text>
+                                <box
+                                  flexGrow={1}
+                                  onMouseUp={() => {
+                                    setSelectedIndex(index());
+                                    toggleRun(run);
+                                  }}
+                                >
+                                  <text
+                                    fg={
+                                      run.status === "error"
+                                        ? ctx.theme.text.feedback.error.base
+                                        : run.status === "cancelled"
+                                          ? ctx.theme.text.feedback.warning.base
+                                          : ctx.theme.text.base
+                                    }
+                                    wrapMode="none"
+                                    truncate
+                                  >
+                                    {`${expanded() ? "▾" : "▸"} ${statusGlyph()} ${statusLabel()}${run.model ? ` · ${run.model}` : ""}${duration() ? ` · ${duration()}` : ""}${run.toolCallCount > 0 ? ` · ${run.toolCallCount} ${run.toolCallCount === 1 ? "step" : "steps"}` : ""}${run.agySessionId ? ` · ${shortId(run.agySessionId)}` : ""}`}
+                                  </text>
+                                </box>
+                                <Show when={isRunningStatus(run.status)}>
+                                  <box flexDirection="row" gap={2} flexShrink={0}>
+                                    <Show when={!run.background && !pending()}>
+                                      <text
+                                        fg={ctx.theme.text.muted}
+                                        onMouseUp={() => {
+                                          setSelectedIndex(index());
+                                          backgroundRun(run);
+                                        }}
+                                      >
+                                        [b bg]
+                                      </text>
+                                    </Show>
+                                    <Show when={pending() !== "cancelling"}>
+                                      <text
+                                        fg={ctx.theme.text.feedback.warning.base}
+                                        onMouseUp={() => {
+                                          setSelectedIndex(index());
+                                          cancelRun(run);
+                                        }}
+                                      >
+                                        [x cancel]
+                                      </text>
+                                    </Show>
+                                  </box>
+                                </Show>
+                              </box>
                               <Show when={!expanded() && run.prompt}>
-                                <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
-                                  {`  ${truncateLine(run.prompt, 120)}`}
-                                </text>
+                                <box
+                                  onMouseUp={() => {
+                                    setSelectedIndex(index());
+                                    toggleRun(run);
+                                  }}
+                                >
+                                  <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
+                                    {`  ${truncateLine(run.prompt, 120)}`}
+                                  </text>
+                                </box>
                               </Show>
                             </box>
 
                             <Show when={expanded()}>
                               <box flexDirection="column" gap={1}>
                                 <box flexDirection="column">
+                                  <Show when={run.background}>
+                                    <text fg={ctx.theme.text.muted}>
+                                      {`job_id: ${run.id}`}
+                                    </text>
+                                  </Show>
                                   <Show when={run.agySessionId}>
                                     {(sid) => (
                                       <text fg={ctx.theme.text.muted}>
@@ -666,7 +819,7 @@ export default Plugin.define({
                                 <Show
                                   when={run.toolCalls.length > 0}
                                   fallback={
-                                    <Show when={run.status === "completed" || run.status === "error"}>
+                                    <Show when={!isRunningStatus(run.status)}>
                                       <text fg={ctx.theme.text.muted}>
                                         (no step trace recorded for this run)
                                       </text>
@@ -685,11 +838,17 @@ export default Plugin.define({
                                         ? []
                                         : collapsed().slice(
                                             0,
-                                            Math.max(0, collapsed().length - RECENT_STEPS_LIMIT),
+                                            Math.max(
+                                              0,
+                                              collapsed().length - RECENT_STEPS_LIMIT,
+                                            ),
                                           ),
                                     );
                                     const hiddenStepCount = createMemo(() =>
-                                      hiddenEntries().reduce((sum, entry) => sum + entry.count, 0),
+                                      hiddenEntries().reduce(
+                                        (sum, entry) => sum + entry.count,
+                                        0,
+                                      ),
                                     );
                                     const visibleSteps = createMemo(() =>
                                       showingAll()
@@ -743,15 +902,18 @@ export default Plugin.define({
                                   )}
                                 </Show>
 
-                                <Show when={run.latestText && (run.status === "running" || run.status === "streaming")}>
+                                <Show when={run.latestText && isRunningStatus(run.status)}>
                                   <text fg={ctx.theme.text.base} wrapMode="word">
                                     {`output: ${run.latestText}`}
                                   </text>
                                 </Show>
 
-                                <Show when={run.errorMessage}>
+                                <Show when={run.errorMessage && run.status === "error"}>
                                   {(err) => (
-                                    <text fg={ctx.theme.text.feedback.error.base} wrapMode="word">
+                                    <text
+                                      fg={ctx.theme.text.feedback.error.base}
+                                      wrapMode="word"
+                                    >
                                       {`error: ${err()}`}
                                     </text>
                                   )}
@@ -767,7 +929,7 @@ export default Plugin.define({
               </Show>
 
               <text fg={ctx.theme.text.muted} flexShrink={0} wrapMode="none" truncate>
-                tab select · enter/click toggle · s all steps · e/c expand/collapse all · j/k scroll
+                tab select · enter toggle · b background · x cancel · s all steps · e/c expand/collapse · j/k scroll
               </text>
             </box>
           </Show>

@@ -1,11 +1,11 @@
 ---
 name: opencode-agy-acp
-description: Driving the `agy` tool from `opencode-agy-acp`, which runs Google Antigravity CLI (`agy acp`) over ACP with native OpenCode permission bridging. Load this whenever the user explicitly asks to use `agy` / Antigravity, runs `/agy`, wants to pick a Gemini 4 or Claude 5.5 model tier, needs to resume a timed-out `agy` session, or needs to handle an `AGY_ERROR [CODE]` result.
+description: Driving the `agy` and `agy_job` tools from `opencode-agy-acp`, which run Google Antigravity CLI (`agy acp`) over ACP with native OpenCode permission bridging and background execution. Load this whenever the user explicitly asks to use `agy` / Antigravity, runs `/agy`, wants to run `agy` in the background, pick a Gemini 4 or Claude 5.5 model tier, resume a timed-out `agy` session, or handle an `AGY_ERROR [CODE]` result.
 ---
 
 # opencode-agy-acp
 
-`agy` delegates work to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol (ACP). Unlike headless print mode, `agy acp` bridges every tool permission request (`read`, `edit`, `bash`, `webfetch`) directly through OpenCode's native `ctx.permission.assert(...)` rules and interactive prompts, streams live step progress into the OpenCode TUI, and supports concurrent runs with explicit `session_id` continuation.
+`agy` delegates work to the local Google Antigravity CLI (`agy acp`) over the Agent Client Protocol (ACP). Unlike headless print mode, `agy acp` bridges every tool permission request (`read`, `edit`, `bash`, `webfetch`) directly through OpenCode's native `ctx.permission.assert(...)` rules and interactive prompts, streams live step progress into the OpenCode TUI, and supports concurrent foreground and background runs with explicit `session_id` continuation.
 
 **Only invoke `agy` when the user explicitly requests using `agy` / Antigravity (or runs `/agy`). Do not call it proactively.**
 
@@ -21,6 +21,19 @@ Nothing `agy` produces is verified. Reading diffs, checking files, and running t
 - **Avoid accidental leading `/` in prompts (use `/goal` intentionally):** `agy acp` interprets leading slash commands (it advertises `/goal` and `/compact`). Start normal prompts with a regular word (e.g., `Review the diff`, not `/review`), or intentionally prefix with `/goal ` when you want `agy` to push through a multi-step checklist without stopping early (pair with a generous `timeout_ms`).
 - **Let `agy` background long commands normally:** `agy`'s shell tool auto-backgrounds commands that run longer than 10s, and `agy acp` natively keeps `session/prompt` open until background tasks finish and wake `agy` back up. Do **not** tell `agy` to "wait in the foreground" or "not leave commands in the background" — that only forces it to busy-poll `manage_task` and waste turns.
 - **Wait for subagents:** If delegating complex work, ask `agy` to wait for any internal subagents before finishing so its final response contains the complete result.
+
+## Background execution (`background`, `wait_ms`, and `agy_job`)
+
+You can run `agy` in the background so the OpenCode session remains free to continue other work or talk with the user:
+
+- **Launch immediately in the background (`background: true`):** `agy` initializes the ACP session (`session/new` or `session/load`) so fast-fail errors surface right away, then detaches the prompt turn and returns `job_id` + `agy_session_id` immediately.
+- **Wait briefly, then auto-background (`wait_ms`):** Pass `wait_ms` (e.g. `10000`) to wait up to that threshold in the foreground; if `agy` completes in time, you get the final answer directly, otherwise it detaches to the background automatically. (Users can also press `b` in `/agy-trace` to move a blocking foreground `agy` call into the background mid-flight.)
+- **Reactive wakeup (no polling):** When a background `agy` run finishes or errors, the plugin automatically delivers its result into the OpenCode session via `ctx.session.synthetic` (`resume: true`) and wakes you back up. **Never busy-poll `agy_job` in a loop** — either continue independent work or end your turn and let the completion notification resume you.
+- **Managing background runs (`agy_job`):**
+  - `agy_job({ action: "list" })` — list running and recent background `agy` jobs in this session.
+  - `agy_job({ action: "status", job_id })` — inspect live step progress or retrieve a completed job's result without blocking.
+  - `agy_job({ action: "wait", job_id, timeout_ms })` — explicitly block until a specific background job (or the next active job if `job_id` is omitted) settles and return its output directly.
+  - `agy_job({ action: "cancel", job_id })` — send graceful ACP `session/cancel` to stop a running background job (or pass `job_id: "all"` to cancel all active jobs in this session). Users can also press `x` in `/agy-trace` to cancel any running trajectory.
 
 ## Model selection (`gemini-4` preferred; `claude-5-5` secondary)
 

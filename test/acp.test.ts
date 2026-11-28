@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
   AcpClient,
@@ -11,6 +14,8 @@ import {
   parseFrontmatterMarkdown,
   type OpenCodeCommandInvocationLike,
   type OpenCodePluginContextLike,
+  type OpenCodeToolContextLike,
+  type OpenCodeToolResult,
 } from "../src/index.ts";
 import {
   classifyAgyError,
@@ -18,7 +23,11 @@ import {
   scrubSecrets,
 } from "../src/errors.ts";
 import type { OpenCodePermissionAssertInput } from "../src/permissions.ts";
-import { collapseConsecutiveSteps } from "../src/trace.ts";
+import {
+  collapseConsecutiveSteps,
+  readSessionTraces,
+  requestRunControl,
+} from "../src/trace.ts";
 
 interface MockAcpController {
   readonly spawner: AcpSpawner;
@@ -236,7 +245,7 @@ describe("opencode-agy-acp plugin", () => {
         transform: async (fn) => {
           fn({
             add: (tool) => {
-              registeredExecute = tool.execute;
+              if (tool.name === "agy") registeredExecute = tool.execute;
             },
           });
           return { dispose: async () => {} };
@@ -347,7 +356,7 @@ describe("opencode-agy-acp plugin", () => {
         transform: async (fn) => {
           fn({
             add: (tool) => {
-              registeredExecute = tool.execute;
+              if (tool.name === "agy") registeredExecute = tool.execute;
             },
           });
           return { dispose: async () => {} };
@@ -519,7 +528,7 @@ describe("opencode-agy-acp plugin", () => {
         transform: async (fn) => {
           fn({
             add: (tool) => {
-              registeredExecute = tool.execute;
+              if (tool.name === "agy") registeredExecute = tool.execute;
             },
           });
           return { dispose: async () => {} };
@@ -620,7 +629,11 @@ describe("opencode-agy-acp plugin", () => {
       permission: { assert: async () => {} },
       tool: {
         transform: async (fn) => {
-          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          fn({
+            add: (tool) => {
+              if (tool.name === "agy") registeredExecute = tool.execute;
+            },
+          });
           return { dispose: async () => {} };
         },
       },
@@ -745,7 +758,11 @@ describe("opencode-agy-acp plugin", () => {
       permission: { assert: async () => {} },
       tool: {
         transform: async (fn) => {
-          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          fn({
+            add: (tool) => {
+              if (tool.name === "agy") registeredExecute = tool.execute;
+            },
+          });
           return { dispose: async () => {} };
         },
       },
@@ -819,7 +836,11 @@ describe("opencode-agy-acp plugin", () => {
       permission: { assert: async () => {} },
       tool: {
         transform: async (fn) => {
-          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          fn({
+            add: (tool) => {
+              if (tool.name === "agy") registeredExecute = tool.execute;
+            },
+          });
           return { dispose: async () => {} };
         },
       },
@@ -857,7 +878,11 @@ describe("opencode-agy-acp plugin", () => {
       permission: { assert: async () => {} },
       tool: {
         transform: async (fn) => {
-          fn({ add: (tool) => { registeredExecute = tool.execute; } });
+          fn({
+            add: (tool) => {
+              if (tool.name === "agy") registeredExecute = tool.execute;
+            },
+          });
           return { dispose: async () => {} };
         },
       },
@@ -961,6 +986,398 @@ describe("opencode-agy-acp plugin", () => {
 
     await dispose();
     expect(disposedCount).toBe(3);
+  });
+
+  test("runs agy in background, bridges session-level permissions, survives foreground signal abort, and wakes via ctx.session.synthetic", async () => {
+    const traceDir = mkdtempSync(path.join(tmpdir(), "agy-bg-test-"));
+    const permissionAsserts: OpenCodePermissionAssertInput[] = [];
+    const syntheticNotices: Array<Record<string, unknown>> = [];
+    let finishPrompt!: () => void;
+    let resolvePromptReceived!: () => void;
+    const promptReceived = new Promise<void>((resolve) => {
+      resolvePromptReceived = resolve;
+    });
+
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: "agy-bg-sess-1" },
+        });
+      } else if (msg.method === "session/set_model") {
+        send({ jsonrpc: "2.0", id: msg.id, result: {} });
+      } else if (msg.method === "session/prompt") {
+        const promptId = msg.id as number;
+        pendingPromptId = promptId;
+        finishPrompt = () => {
+          send({
+            jsonrpc: "2.0",
+            id: 401,
+            method: "session/request_permission",
+            params: {
+              sessionId: "agy-bg-sess-1",
+              toolCall: {
+                toolCallId: "tc-bg-edit",
+                title: "Edit src/bg.ts",
+                kind: "edit",
+                locations: [{ path: "src/bg.ts" }],
+              },
+              options: [
+                { optionId: "allow_once", kind: "allow_once" },
+                { optionId: "reject_once", kind: "reject_once" },
+              ],
+            },
+          });
+        };
+        resolvePromptReceived();
+      } else if (msg.id === 401 && msg.result) {
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-bg-sess-1",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Background refactor complete." },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          id: pendingPromptId,
+          result: { stopReason: "end_turn" },
+        });
+      }
+    });
+    let pendingPromptId = 0;
+
+    const toolsMap = new Map<
+      string,
+      (input: unknown, ctx: OpenCodeToolContextLike) => Promise<OpenCodeToolResult>
+    >();
+
+    let resolveSynthetic!: () => void;
+    const syntheticCalled = new Promise<void>((resolve) => {
+      resolveSynthetic = resolve;
+    });
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: {
+        assert: async (input) => {
+          permissionAsserts.push(input);
+        },
+      },
+      tool: {
+        transform: async (fn) => {
+          fn({
+            add: (tool) => {
+              toolsMap.set(tool.name, tool.execute);
+            },
+          });
+          return { dispose: async () => {} };
+        },
+      },
+      session: {
+        synthetic: async (input) => {
+          syntheticNotices.push(input as unknown as Record<string, unknown>);
+          resolveSynthetic();
+        },
+      },
+    };
+
+    try {
+      const plugin = createAgyAcpPlugin({ spawn: mock.spawner, traceDir });
+      const dispose = await plugin.setup(fakeCtx);
+
+      const agyExec = toolsMap.get("agy")!;
+      const agyJobExec = toolsMap.get("agy_job")!;
+      expect(agyExec).toBeDefined();
+      expect(agyJobExec).toBeDefined();
+
+      const fgAbort = new AbortController();
+      const launchRes = await agyExec(
+        { prompt: "Refactor src/bg.ts", background: true, model: "gemini-4-neon-medium" },
+        {
+          sessionID: "oc-bg-1",
+          agent: "build",
+          messageID: "msg-launch",
+          id: "call-bg-1",
+          signal: fgAbort.signal,
+        },
+      );
+
+      expect(launchRes.metadata?.background).toBe(true);
+      expect(launchRes.metadata?.status).toBe("running");
+      expect(launchRes.metadata?.jobId).toBe("call-bg-1");
+      expect(launchRes.metadata?.agySessionId).toBe("agy-bg-sess-1");
+      expect(launchRes.content).toContain("[agy_job_id: call-bg-1]");
+      expect(launchRes.content).toContain("[agy_session_id: agy-bg-sess-1]");
+
+      // Aborting the original foreground call's signal AFTER detachment must NOT
+      // cancel the background `agy` run!
+      fgAbort.abort();
+
+      const listRes = await agyJobExec({ action: "list" }, { sessionID: "oc-bg-1" });
+      expect(listRes.content).toContain("call-bg-1 [running · bg");
+
+      // Trigger background permission request + completion
+      await promptReceived;
+      finishPrompt();
+      await syntheticCalled;
+
+      expect(permissionAsserts.length).toBe(1);
+      expect(permissionAsserts[0]?.action).toBe("edit");
+      // Detached background permission check must omit completed foreground `source`
+      expect(permissionAsserts[0]?.source).toBeUndefined();
+
+      expect(syntheticNotices.length).toBe(1);
+      expect(syntheticNotices[0]?.sessionID).toBe("oc-bg-1");
+      expect(syntheticNotices[0]?.delivery).toBe("queue");
+      expect(syntheticNotices[0]?.resume).toBe(true);
+      expect(String(syntheticNotices[0]?.text)).toContain("Background refactor complete.");
+      expect(String(syntheticNotices[0]?.text)).toContain("[agy_session_id: agy-bg-sess-1]");
+
+      const traces = readSessionTraces("oc-bg-1", traceDir);
+      expect(traces[0]?.status).toBe("completed");
+      expect(traces[0]?.background).toBe(true);
+
+      await dispose();
+    } finally {
+      rmSync(traceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("supports wait_ms auto-backgrounding, agy_job wait deduplication, wait signal isolation, and agy_job cancel", async () => {
+    let sessionSeq = 0;
+    const cancelledSessions: string[] = [];
+    const pendingBySession = new Map<
+      string,
+      { id: number | string; send: (reply: Record<string, unknown>) => void }
+    >();
+
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        sessionSeq += 1;
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: `agy-wait-${sessionSeq}` },
+        });
+      } else if (msg.method === "session/prompt") {
+        const params = msg.params as { sessionId: string };
+        pendingBySession.set(params.sessionId, {
+          id: msg.id as number | string,
+          send,
+        });
+      } else if (msg.method === "session/cancel") {
+        const params = msg.params as { sessionId: string };
+        cancelledSessions.push(params.sessionId);
+        const pending = pendingBySession.get(params.sessionId);
+        if (pending) {
+          pending.send({
+            jsonrpc: "2.0",
+            id: pending.id,
+            error: { code: -32800, message: "Cancelled" },
+          });
+        }
+      }
+    });
+
+    const syntheticNotices: Array<Record<string, unknown>> = [];
+    const toolsMap = new Map<
+      string,
+      (input: unknown, ctx: OpenCodeToolContextLike) => Promise<OpenCodeToolResult>
+    >();
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async (fn) => {
+          fn({
+            add: (tool) => {
+              toolsMap.set(tool.name, tool.execute);
+            },
+          });
+          return { dispose: async () => {} };
+        },
+      },
+      session: {
+        synthetic: async (input) => {
+          syntheticNotices.push(input as unknown as Record<string, unknown>);
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin({ spawn: mock.spawner, traceDir: false });
+    const dispose = await plugin.setup(fakeCtx);
+    const agyExec = toolsMap.get("agy")!;
+    const agyJobExec = toolsMap.get("agy_job")!;
+
+    // 1. Slow call with wait_ms=20 detaches into background automatically
+    const detached = await agyExec(
+      { prompt: "Slow audit", wait_ms: 20 },
+      { sessionID: "oc-wait-sess", id: "job-wait-1" },
+    );
+    expect(detached.metadata?.background).toBe(true);
+    expect(detached.metadata?.detachedReason).toBe("wait_ms");
+    expect(detached.metadata?.jobId).toBe("job-wait-1");
+
+    // 2. Aborting `agy_job({ action: "wait" })` stops waiting WITHOUT killing the job
+    const waitAbort = new AbortController();
+    const abortedWait = agyJobExec(
+      { action: "wait", job_id: "job-wait-1" },
+      { sessionID: "oc-wait-sess", signal: waitAbort.signal },
+    );
+    setTimeout(() => waitAbort.abort(), 10);
+    await expect(abortedWait).rejects.toThrow("AGY_WAIT_ABORTED");
+    expect(cancelledSessions).toEqual([]);
+
+    // 3. Active `agy_job({ action: "wait" })` receives completion directly and
+    //    suppresses a duplicate `ctx.session.synthetic` message
+    const waitPromise = agyJobExec(
+      { action: "wait", job_id: "job-wait-1" },
+      { sessionID: "oc-wait-sess" },
+    );
+    const pending1 = pendingBySession.get("agy-wait-1")!;
+    pending1.send({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "agy-wait-1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Audit finished." },
+        },
+      },
+    });
+    pending1.send({
+      jsonrpc: "2.0",
+      id: pending1.id,
+      result: { stopReason: "end_turn" },
+    });
+
+    const waitedRes = await waitPromise;
+    expect(waitedRes.content).toContain("Audit finished.");
+    expect(waitedRes.metadata?.status).toBe("completed");
+    expect(syntheticNotices.length).toBe(0);
+
+    // 4. `agy_job({ action: "cancel" })` sends ACP `session/cancel` cleanly
+    const toCancel = await agyExec(
+      { prompt: "Long build", background: true },
+      { sessionID: "oc-wait-sess", id: "job-cancel-2" },
+    );
+    expect(toCancel.metadata?.agySessionId).toBe("agy-wait-2");
+
+    const cancelRes = await agyJobExec(
+      { action: "cancel", job_id: "job-cancel-2" },
+      { sessionID: "oc-wait-sess" },
+    );
+    expect(cancelRes.content).toContain("Cancelled 1 `agy` job");
+    expect(cancelRes.metadata?.cancelledJobIds).toEqual(["job-cancel-2"]);
+    expect(cancelledSessions).toEqual(["agy-wait-2"]);
+    expect(syntheticNotices.length).toBe(0);
+
+    await dispose();
+  });
+
+  test("handles TUI requestRunControl for mid-flight backgrounding ('b') and cancellation ('x')", async () => {
+    const traceDir = mkdtempSync(path.join(tmpdir(), "agy-ctl-test-"));
+    const cancelledSessions: string[] = [];
+    let pendingPromptId = 0;
+
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: "agy-ctl-1" },
+        });
+      } else if (msg.method === "session/prompt") {
+        pendingPromptId = msg.id as number;
+      } else if (msg.method === "session/cancel") {
+        const params = msg.params as { sessionId: string };
+        cancelledSessions.push(params.sessionId);
+        send({
+          jsonrpc: "2.0",
+          id: pendingPromptId,
+          error: { code: -32800, message: "Cancelled" },
+        });
+      }
+    });
+
+    const syntheticNotices: Array<Record<string, unknown>> = [];
+    const toolsMap = new Map<
+      string,
+      (input: unknown, ctx: OpenCodeToolContextLike) => Promise<OpenCodeToolResult>
+    >();
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async (fn) => {
+          fn({
+            add: (tool) => {
+              toolsMap.set(tool.name, tool.execute);
+            },
+          });
+          return { dispose: async () => {} };
+        },
+      },
+      session: {
+        synthetic: async (input) => {
+          syntheticNotices.push(input as unknown as Record<string, unknown>);
+        },
+      },
+    };
+
+    try {
+      const plugin = createAgyAcpPlugin({ spawn: mock.spawner, traceDir });
+      const dispose = await plugin.setup(fakeCtx);
+      const agyExec = toolsMap.get("agy")!;
+      const agyJobExec = toolsMap.get("agy_job")!;
+
+      // Start a blocking foreground `agy` call
+      const fgPromise = agyExec(
+        { prompt: "Deep repo analysis" },
+        { sessionID: "oc-ctl", id: "run-ctl-1" },
+      );
+
+      // Wait briefly for ACP session setup, then press `b` from TUI to detach!
+      await new Promise((r) => setTimeout(r, 25));
+      requestRunControl("oc-ctl", "run-ctl-1", "background", traceDir);
+
+      const detachedRes = await fgPromise;
+      expect(detachedRes.metadata?.background).toBe(true);
+      expect(detachedRes.metadata?.detachedReason).toBe("tui");
+
+      // Now press `x` from TUI to cancel the detached background run!
+      requestRunControl("oc-ctl", "run-ctl-1", "cancel", traceDir);
+
+      const waitCancelled = await agyJobExec(
+        { action: "wait", job_id: "run-ctl-1", timeout_ms: 2_000 },
+        { sessionID: "oc-ctl" },
+      );
+      expect(waitCancelled.metadata?.status).toBe("cancelled");
+      expect(cancelledSessions).toEqual(["agy-ctl-1"]);
+
+      const traces = readSessionTraces("oc-ctl", traceDir);
+      expect(traces[0]?.status).toBe("cancelled");
+      expect(traces[0]?.background).toBe(true);
+
+      await dispose();
+    } finally {
+      rmSync(traceDir, { recursive: true, force: true });
+    }
   });
 });
 
