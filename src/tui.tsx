@@ -371,6 +371,15 @@ export default Plugin.define({
       append: "session.panel",
       render(input) {
         const isActivePanel = createMemo(() => input.name === PANEL_NAME);
+        const isCompactHeader = createMemo(() => {
+          const w = input.width;
+          if (typeof w === "number" && w > 1) return w < 84;
+          return input.presentation === "panel";
+        });
+        const isNarrowControls = createMemo(() => {
+          const w = input.width;
+          return typeof w === "number" && w > 1 && w < 56;
+        });
         const focused = createMemo(
           () =>
             isActivePanel() &&
@@ -634,6 +643,7 @@ export default Plugin.define({
             <box
               flexDirection="column"
               flexGrow={1}
+              minWidth={0}
               paddingLeft={2}
               paddingRight={2}
               paddingTop={1}
@@ -641,22 +651,59 @@ export default Plugin.define({
               gap={1}
               onMouseUp={() => input.focus()}
             >
-              <box flexDirection="row" justifyContent="space-between" gap={1} flexShrink={0}>
-                <text fg={ctx.theme.text.base}>
+              <box
+                flexDirection="row"
+                flexWrap="wrap"
+                justifyContent="space-between"
+                columnGap={isCompactHeader() ? 1 : 2}
+                rowGap={0}
+                flexShrink={0}
+              >
+                <text fg={ctx.theme.text.base} wrapMode="none" flexShrink={0}>
                   {`◈ agy trace (${allRuns().length} ${allRuns().length === 1 ? "run" : "runs"})`}
                 </text>
-                <box flexDirection="row" gap={2} flexShrink={0}>
-                  <text fg={ctx.theme.text.muted} onMouseUp={() => setAllExpanded(true)}>
-                    [e expand]
+                <box
+                  flexDirection="row"
+                  flexWrap="wrap"
+                  columnGap={isCompactHeader() ? 1 : 2}
+                  rowGap={0}
+                  flexShrink={0}
+                >
+                  <text
+                    fg={ctx.theme.text.muted}
+                    wrapMode="none"
+                    flexShrink={0}
+                    onMouseUp={() => setAllExpanded(true)}
+                  >
+                    {isCompactHeader() ? "[e all]" : "[e expand]"}
                   </text>
-                  <text fg={ctx.theme.text.muted} onMouseUp={() => setAllExpanded(false)}>
-                    [c collapse]
+                  <text
+                    fg={ctx.theme.text.muted}
+                    wrapMode="none"
+                    flexShrink={0}
+                    onMouseUp={() => setAllExpanded(false)}
+                  >
+                    {isCompactHeader() ? "[c none]" : "[c collapse]"}
                   </text>
-                  <text fg={ctx.theme.text.muted} onMouseUp={() => input.toggleFullscreen()}>
-                    {input.presentation === "fullscreen" ? "[f split]" : "[f fullscreen]"}
+                  <text
+                    fg={ctx.theme.text.muted}
+                    wrapMode="none"
+                    flexShrink={0}
+                    onMouseUp={() => input.toggleFullscreen()}
+                  >
+                    {input.presentation === "fullscreen"
+                      ? "[f split]"
+                      : isCompactHeader()
+                        ? "[f full]"
+                        : "[f fullscreen]"}
                   </text>
-                  <text fg={ctx.theme.text.muted} onMouseUp={() => input.close()}>
-                    [q/esc close]
+                  <text
+                    fg={ctx.theme.text.muted}
+                    wrapMode="none"
+                    flexShrink={0}
+                    onMouseUp={() => input.close()}
+                  >
+                    {isCompactHeader() ? "[q close]" : "[q/esc close]"}
                   </text>
                 </box>
               </box>
@@ -671,11 +718,12 @@ export default Plugin.define({
               >
                 <scrollbox
                   flexGrow={1}
+                  minWidth={0}
                   ref={(el: unknown) => {
                     scroll = el as typeof scroll;
                   }}
                 >
-                  <box flexDirection="column" gap={1}>
+                  <box flexDirection="column" gap={1} minWidth={0}>
                     <For each={allRuns()}>
                       {(run, index) => {
                         const duration = createMemo(() =>
@@ -717,10 +765,12 @@ export default Plugin.define({
                               <box
                                 flexDirection="row"
                                 justifyContent="space-between"
-                                gap={2}
+                                gap={1}
                               >
                                 <box
                                   flexGrow={1}
+                                  flexShrink={1}
+                                  minWidth={0}
                                   onMouseUp={() => {
                                     setSelectedIndex(index());
                                     toggleRun(run);
@@ -741,10 +791,12 @@ export default Plugin.define({
                                   </text>
                                 </box>
                                 <Show when={isRunningStatus(run.status)}>
-                                  <box flexDirection="row" gap={2} flexShrink={0}>
+                                  <box flexDirection="row" gap={1} flexShrink={0}>
                                     <Show when={!run.background && !pending()}>
                                       <text
                                         fg={ctx.theme.text.muted}
+                                        wrapMode="none"
+                                        flexShrink={0}
                                         onMouseUp={() => {
                                           setSelectedIndex(index());
                                           backgroundRun(run);
@@ -756,12 +808,14 @@ export default Plugin.define({
                                     <Show when={pending() !== "cancelling"}>
                                       <text
                                         fg={ctx.theme.text.feedback.warning.base}
+                                        wrapMode="none"
+                                        flexShrink={0}
                                         onMouseUp={() => {
                                           setSelectedIndex(index());
                                           cancelRun(run);
                                         }}
                                       >
-                                        [x cancel]
+                                        {isNarrowControls() ? "[x]" : "[x cancel]"}
                                       </text>
                                     </Show>
                                   </box>
@@ -785,13 +839,13 @@ export default Plugin.define({
                               <box flexDirection="column" gap={1}>
                                 <box flexDirection="column">
                                   <Show when={run.background}>
-                                    <text fg={ctx.theme.text.muted}>
+                                    <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
                                       {`job_id: ${run.id}`}
                                     </text>
                                   </Show>
                                   <Show when={run.agySessionId}>
                                     {(sid) => (
-                                      <text fg={ctx.theme.text.muted}>
+                                      <text fg={ctx.theme.text.muted} wrapMode="none" truncate>
                                         {`session_id: ${sid()}`}
                                       </text>
                                     )}
