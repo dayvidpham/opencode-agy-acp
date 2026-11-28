@@ -203,6 +203,33 @@ interface TurnAccumulator {
   thoughts: string;
   plan: AgyPlanEntry[];
   readonly toolCalls: Map<string, AgyToolCallSummary>;
+  readonly toolNames?: Map<string, string>;
+  readonly daemonTools?: Set<string>;
+  readonly pendingBgTools?: Set<string>;
+  readonly activeTools?: Set<string>;
+}
+
+const BACKGROUNDABLE_AGY_TOOLS = new Set([
+  "run_command",
+  "schedule",
+  "run_workflow",
+]);
+
+function isActiveToolStatus(status: string | undefined): boolean {
+  const st = (status ?? "").toLowerCase();
+  return st === "in_progress" || st === "pending" || st === "running";
+}
+
+function isSettledToolStatus(status: string | undefined): boolean {
+  const st = (status ?? "").toLowerCase();
+  return (
+    st === "completed" ||
+    st === "done" ||
+    st === "failed" ||
+    st === "error" ||
+    st === "cancelled" ||
+    st === "rejected"
+  );
 }
 
 type CancelSource = "opencode" | "job_tool" | "tui";
@@ -364,6 +391,31 @@ export function applySessionUpdate(
           ? update.toolCallId
           : `tc-${acc.toolCalls.size + 1}`;
       const prev = acc.toolCalls.get(id);
+      const rawName =
+        nonEmptyString(update.name)?.toLowerCase() ?? acc.toolNames?.get(id);
+      if (rawName && acc.toolNames) {
+        acc.toolNames.set(id, rawName);
+      }
+      const rawArgs = asRecord(update.rawInput) ?? asRecord(update.args);
+      if (rawArgs?.IsDaemon === true) {
+        acc.daemonTools?.add(id);
+      }
+      const isDaemon = acc.daemonTools?.has(id) === true;
+      const effectiveStatus =
+        typeof update.status === "string" ? update.status : prev?.status;
+
+      if (!isDaemon && rawName) {
+        if (isActiveToolStatus(effectiveStatus)) {
+          acc.activeTools?.add(id);
+          if (BACKGROUNDABLE_AGY_TOOLS.has(rawName)) {
+            acc.pendingBgTools?.add(id);
+          }
+        } else if (isSettledToolStatus(effectiveStatus)) {
+          acc.activeTools?.delete(id);
+          acc.pendingBgTools?.delete(id);
+        }
+      }
+
       const title =
         typeof update.title === "string" && update.title.trim() !== ""
           ? update.title.trim()
@@ -379,8 +431,7 @@ export function applySessionUpdate(
         id,
         title,
         kind: typeof update.kind === "string" ? update.kind : prev?.kind,
-        status:
-          typeof update.status === "string" ? update.status : prev?.status,
+        status: effectiveStatus,
         ...(detail ? { detail } : {}),
       });
       return true;
@@ -471,7 +522,7 @@ function formatDetachedLaunchResult(
       ? [`- progress: ${snap.toolCallCount} ${snap.toolCallCount === 1 ? "step" : "steps"} (${snap.currentActivity ?? "working"})`]
       : []),
     "",
-    "OpenCode will receive a completion notification automatically when this background `agy` run finishes. Do NOT poll `agy_job` in a loop — continue independent work or end your turn and wait for the wakeup (use `agy_job` only for explicit `list` / `wait` / `cancel` control).",
+    "OpenCode will receive a completion notification automatically when this background `agy` run (including any internal `agy` background commands and reactive wakeup turns) finishes. Do NOT poll `agy_job` in a loop, and do NOT send extra \"continue\" prompts into `session_id` while this job is still running — continue independent work or end your turn and wait for the wakeup (use `agy_job` only for explicit `list` / `wait` / `cancel` control).",
     "",
     `[agy_job_id: ${job.id}]`,
     ...(job.agySessionId ? [`[agy_session_id: ${job.agySessionId}]`] : []),
@@ -569,6 +620,7 @@ export interface CreatePluginOptions {
   readonly spawn?: AcpSpawner;
   readonly env?: Record<string, string | undefined>;
   readonly traceDir?: string | false;
+  readonly postPromptSettleMs?: number;
 }
 
 export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
@@ -779,10 +831,11 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             "Usage guidelines:",
             "- Only invoke this tool when the user explicitly requests using `agy` / Antigravity (or runs `/agy`). Do not call it proactively without an explicit user request.",
             "- `agy` is a full autonomous coding agent with its own workspace read/search/edit/shell tools. Delegate cohesive, goal-oriented tasks with exact file paths and constraints rather than pasting large files.",
-            "- Explicitly state whether the task is read-only analysis or allowed to edit files/run commands, and start `prompt` with a normal word (never a leading `/`, which triggers `agy` slash-command expansion).",
+            "- Explicitly state whether the task is read-only analysis or allowed to edit files/run commands.",
+            "- Leading `/` is an `agy` command, not plain text: `agy acp` parses any prompt starting with `/` (even after leading whitespace) as one of its own slash commands (`/goal`, `/compact`). Use `/goal <brief>` intentionally for multi-step checklists; do not start prompts with OpenCode-only role commands (e.g. `/worker`, `/architect`, `/reviewer`, `/review`) that `agy` does not know — describe the role/task in words instead.",
             "- Nothing `agy` produces is verified: ask `agy` to wait for any subagents and report changed files/verification in its final reply, then inspect diffs and run tests yourself.",
             "- Sessions are explicit: omit `session_id` to start a fresh `agy` session; pass `session_id` (from a prior result's `[agy_session_id: ...]` or `metadata.agySessionId`) to continue that specific session. Multiple `agy` calls can run concurrently.",
-            "- Foreground vs. background: by default, calls wait for `agy` to finish (default 15m timeout). Pass `background: true` to detach immediately (or `wait_ms` to wait briefly and auto-background if still running); OpenCode is notified automatically when the background job finishes, so never busy-poll `agy_job`.",
+            "- Foreground vs. background & reactive wakeups: `opencode-agy-acp` automatically holds the ACP session open across `agy`'s own background commands (>10s) and reactive wakeup turns until `agy` finishes. Pass `background: true` to detach immediately (or `wait_ms` to auto-background after a threshold); OpenCode is woken automatically when the job finishes. Never busy-poll `agy_job`, and never send duplicate \"continue\" prompts into an active session that only emitted an interim status line (e.g. \"running make check…\") — wait for the wakeup report.",
           ].join("\n"),
           input: {
             type: "object",
@@ -790,7 +843,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               prompt: {
                 type: "string",
                 description:
-                  "The task or question to send to Antigravity (`agy`). Start with a normal word (not `/`).",
+                  "The task or question to send to Antigravity (`agy`). Note: a leading `/` (after any whitespace) is parsed as an `agy` slash command — use `/goal <brief>` intentionally for multi-step work, and avoid OpenCode-only commands like `/worker` or `/review`.",
               },
               session_id: {
                 type: "string",
@@ -868,6 +921,10 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
               thoughts: "",
               plan: [],
               toolCalls: new Map(),
+              toolNames: new Map(),
+              daemonTools: new Set(),
+              pendingBgTools: new Set(),
+              activeTools: new Set(),
             };
 
             let agySessionId = requestedSessionId;
@@ -1103,6 +1160,10 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             getSessionJobMap(toolCtx.sessionID).set(runId, jobRecord);
             ensureControlLoop();
 
+            let postPromptUpdateListener:
+              | ((updateKind: string) => void)
+              | undefined;
+
             client.setTurnHandlers({
               onUpdate: async (params) => {
                 const updateSessionId =
@@ -1112,7 +1173,15 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
                 if (updateSessionId && updateSessionId !== sessionIdForTurn) {
                   return;
                 }
+                const updateObj = asRecord(params.update);
+                const updateKind =
+                  typeof updateObj?.sessionUpdate === "string"
+                    ? updateObj.sessionUpdate
+                    : typeof updateObj?.type === "string"
+                      ? updateObj.type
+                      : "";
                 const structural = applySessionUpdate(acc, params);
+                postPromptUpdateListener?.(updateKind);
                 await emitProgress(structural);
               },
               onPermissionRequest: async (params) => {
@@ -1131,12 +1200,164 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
 
             await emitProgress(true);
 
+            // When `agy` backgrounds a long `run_command` (>10s), `schedule`, or
+            // `run_workflow`, `agy acp` resolves the initial `session/prompt` RPC
+            // at the end of turn 1 while the background tool call still has
+            // `status: "in_progress"`, then streams `tool_call_update`
+            // (`status: "completed"`) + `agy`'s reactive wakeup turn(s) over the
+            // same ACP connection. Hold the session open until all non-daemon
+            // background tools and reactive wakeup steps settle.
+            const waitForPostPromptWakeups = async (
+              deadlineAt: number,
+            ): Promise<void> => {
+              if ((acc.pendingBgTools?.size ?? 0) === 0) return;
+
+              const settleQuietMs = Math.max(
+                10,
+                pluginOptions.postPromptSettleMs ?? 600,
+              );
+              const remainingMs = Math.max(1, deadlineAt - Date.now());
+              const fallbackIdleMs = Math.min(
+                remainingMs,
+                Math.max(settleQuietMs * 20, 120_000),
+              );
+
+              await new Promise<void>((resolve, reject) => {
+                let finished = false;
+                let settleTimer: ReturnType<typeof setTimeout> | undefined;
+                let fallbackIdleTimer: ReturnType<typeof setTimeout> | undefined;
+                let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+                const cleanup = () => {
+                  if (finished) return;
+                  finished = true;
+                  postPromptUpdateListener = undefined;
+                  if (settleTimer !== undefined) clearTimeout(settleTimer);
+                  if (fallbackIdleTimer !== undefined) {
+                    clearTimeout(fallbackIdleTimer);
+                  }
+                  if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+                  jobAbortController.signal.removeEventListener(
+                    "abort",
+                    onAbort,
+                  );
+                };
+
+                const finishResolve = () => {
+                  if (finished) return;
+                  cleanup();
+                  resolve();
+                };
+
+                const finishReject = (err: Error) => {
+                  if (finished) return;
+                  cleanup();
+                  reject(err);
+                };
+
+                const onAbort = () => {
+                  void client.cancelSession(sessionIdForTurn).catch(() => {});
+                  finishReject(
+                    new Error(
+                      `AGY_ACP_CANCELLED: prompt aborted by OpenCode (session_id=${sessionIdForTurn})`,
+                    ),
+                  );
+                };
+
+                if (jobAbortController.signal.aborted) {
+                  onAbort();
+                  return;
+                }
+                jobAbortController.signal.addEventListener("abort", onAbort, {
+                  once: true,
+                });
+
+                deadlineTimer = setTimeout(() => {
+                  void client.cancelSession(sessionIdForTurn).catch(() => {});
+                  finishReject(
+                    new Error(
+                      `AGY_ACP_TIMEOUT: prompt exceeded ${timeoutMs}ms (session_id=${sessionIdForTurn})`,
+                    ),
+                  );
+                }, remainingMs);
+
+                const armFallbackIdle = () => {
+                  if (fallbackIdleTimer !== undefined) {
+                    clearTimeout(fallbackIdleTimer);
+                  }
+                  fallbackIdleTimer = setTimeout(finishResolve, fallbackIdleMs);
+                };
+
+                postPromptUpdateListener = (updateKind) => {
+                  const hasPendingBg = (acc.pendingBgTools?.size ?? 0) > 0;
+                  const hasActiveTool = (acc.activeTools?.size ?? 0) > 0;
+
+                  if (hasPendingBg || hasActiveTool) {
+                    if (settleTimer !== undefined) {
+                      clearTimeout(settleTimer);
+                      settleTimer = undefined;
+                    }
+                    if (fallbackIdleTimer !== undefined) {
+                      clearTimeout(fallbackIdleTimer);
+                      fallbackIdleTimer = undefined;
+                    }
+                    return;
+                  }
+
+                  // All background and followup tool calls have settled; wait
+                  // for the wakeup LLM turn's trailing `usage_update` + quiet
+                  // settle window (cancelling if another tool_call follows).
+                  if (updateKind === "usage_update") {
+                    if (settleTimer !== undefined) clearTimeout(settleTimer);
+                    settleTimer = setTimeout(finishResolve, settleQuietMs);
+                    return;
+                  }
+
+                  if (
+                    updateKind === "agent_message_chunk" ||
+                    updateKind === "agent_thought_chunk" ||
+                    updateKind === "tool_call" ||
+                    updateKind === "tool_call_update" ||
+                    updateKind === "plan"
+                  ) {
+                    if (settleTimer !== undefined) {
+                      clearTimeout(settleTimer);
+                      settleTimer = undefined;
+                    }
+                    armFallbackIdle();
+                  }
+                };
+
+                void client.waitForExit().then((code) => {
+                  if (finished) return;
+                  const hasPendingBg = (acc.pendingBgTools?.size ?? 0) > 0;
+                  if (hasPendingBg && code !== 0 && code !== null) {
+                    finishReject(
+                      new Error(
+                        `agy acp exited unexpectedly with code ${code}${client.stderrTail ? `: ${client.stderrTail.trim().slice(-500)}` : ""}`,
+                      ),
+                    );
+                  } else {
+                    finishResolve();
+                  }
+                });
+              });
+            };
+
             const runPromptTurn = async (): Promise<void> => {
+              const deadlineAt = startedAt + timeoutMs;
               try {
                 const res = await client.prompt(sessionIdForTurn, prompt, {
                   signal: jobAbortController.signal,
                   timeoutMs,
                 });
+
+                if (
+                  (acc.pendingBgTools?.size ?? 0) > 0 &&
+                  !jobAbortController.signal.aborted
+                ) {
+                  await waitForPostPromptWakeups(deadlineAt);
+                }
 
                 const toolCalls = Array.from(acc.toolCalls.values());
                 const body = acc.text.trim()
@@ -1317,7 +1538,7 @@ export function createAgyAcpPlugin(pluginOptions: CreatePluginOptions = {}) {
             "Inspect, wait on, or cancel background `agy` tool calls in the current OpenCode session.",
             "",
             "Usage guidelines:",
-            "- Background `agy` runs automatically wake the OpenCode session with their full output when they finish. Do NOT poll `agy_job` in a loop.",
+            "- Background `agy` runs automatically wake the OpenCode session with their full output when they finish (including after internal `agy` background commands >10s wake `agy` back up). Do NOT poll `agy_job` in a loop, and do NOT send duplicate \"continue\" prompts into an active job's `session_id`.",
             "- Use `action: \"list\"` to view active and recent `agy` jobs in this session.",
             "- Use `action: \"status\"` with `job_id` for a non-blocking snapshot (or to retrieve an already-completed job's result).",
             "- Use `action: \"wait\"` (with optional `job_id` and `timeout_ms`) only when you explicitly need to block until a background `agy` run finishes before taking your next step.",

@@ -52,7 +52,7 @@ When the `agy-trace` panel is focused (or in fullscreen):
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `prompt` | `string` (required) | Task or question to send to `agy`. Start with a normal word (never a leading `/`, which triggers `agy` slash-command expansion). |
+| `prompt` | `string` (required) | Task or question to send to `agy`. A leading `/` (after any whitespace) is parsed as an `agy` slash command (`/goal`, `/compact`) — use `/goal <brief>` intentionally for multi-step checklists, and avoid OpenCode-only slash commands like `/worker` or `/review`. |
 | `session_id` | `string` | Explicitly continue a specific `agy` ACP session ID via `session/load`. Omit to always start a fresh `agy` session. |
 | `cwd` | `string` | Working directory for the `agy` session (defaults to the current workspace). |
 | `model` | `string` | Optional model ID to select via ACP `session/set_model` (e.g. `gemini-4-hydrogen-medium`, `gemini-4-neon-medium`, `gemini-4-argon-medium`, or `claude-sonnet-5-5-medium` / `claude-opus-5-5-medium`). |
