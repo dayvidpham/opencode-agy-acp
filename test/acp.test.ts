@@ -974,6 +974,9 @@ describe("opencode-agy-acp plugin", () => {
     expect(prompted[0]?.sessionID).toBe("oc-cmd-1");
     expect(String(prompted[0]?.text)).toContain("Review src/acp.ts");
     expect(String(prompted[0]?.text)).toContain("gemini-4");
+    expect(String(prompted[0]?.text)).toContain("/goal");
+    expect(String(prompted[0]?.text)).toContain("/worker");
+    expect(String(prompted[0]?.text)).not.toContain("never a leading");
     expect(String(prompted[0]?.text)).not.toContain("flash-3.8");
     expect(prompted[0]?.delivery).toBe("steer");
 
@@ -982,6 +985,9 @@ describe("opencode-agy-acp plugin", () => {
     expect(skill?.name).toBe("opencode-agy-acp");
     expect(String(skill?.content)).not.toContain("---\nname:");
     expect(String(skill?.content)).toContain("gemini-4-{neon|hydrogen}-{low|medium|high|xhigh}");
+    expect(String(skill?.content)).toContain("A leading `/` is an `agy` command, not plain text");
+    expect(String(skill?.content)).toContain("Do not nudge interim status replies");
+    expect(String(skill?.content)).not.toContain("natively keeps `session/prompt` open");
     expect(String(skill?.content)).not.toContain("flash-3.8");
 
     await dispose();
@@ -1378,6 +1384,318 @@ describe("opencode-agy-acp plugin", () => {
     } finally {
       rmSync(traceDir, { recursive: true, force: true });
     }
+  });
+
+  test("holds ACP session open across post-prompt background run_command wakeup and follow-up tool calls without premature completion", async () => {
+    const permissionAsserts: OpenCodePermissionAssertInput[] = [];
+    const syntheticNotices: Array<Record<string, unknown>> = [];
+    let finishBgMakeCheck!: () => void;
+    let resolvePromptReceived!: () => void;
+    const promptReceived = new Promise<void>((resolve) => {
+      resolvePromptReceived = resolve;
+    });
+
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: "agy-wakeup-1" },
+        });
+      } else if (msg.method === "session/prompt") {
+        // Turn 1: `make check` backgrounds (`status: "in_progress"`), `agy` emits
+        // an interim status line, and `session/prompt` resolves early!
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-wakeup-1",
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: "call_make_check",
+              name: "run_command",
+              kind: "execute",
+              status: "in_progress",
+              title: "make check",
+              args: { CommandLine: "make check", WaitMsBeforeAsync: 5000 },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-wakeup-1",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Running make check…" },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { stopReason: "end_turn" },
+        });
+
+        finishBgMakeCheck = () => {
+          // Background `make check` finishes AFTER `session/prompt` resolved!
+          send({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "agy-wakeup-1",
+              update: {
+                sessionUpdate: "tool_call_update",
+                toolCallId: "call_make_check",
+                name: "run_command",
+                kind: "execute",
+                status: "completed",
+                title: "make check",
+              },
+            },
+          });
+          // Reactive wakeup LLM step 1: calls `git commit` (with usage_update right before tool_call!)
+          send({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "agy-wakeup-1",
+              update: { sessionUpdate: "usage_update", used: 12000, size: 1048576 },
+            },
+          });
+          send({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "agy-wakeup-1",
+              update: {
+                sessionUpdate: "tool_call",
+                toolCallId: "call_git_commit",
+                name: "run_command",
+                kind: "execute",
+                status: "pending",
+                title: "git commit -m 'fix'",
+                args: { CommandLine: "git commit -m 'fix'" },
+              },
+            },
+          });
+          send({
+            jsonrpc: "2.0",
+            id: "perm_commit",
+            method: "session/request_permission",
+            params: {
+              sessionId: "agy-wakeup-1",
+              toolCall: {
+                toolCallId: "call_git_commit",
+                name: "run_command",
+                kind: "execute",
+                title: "git commit -m 'fix'",
+                args: { CommandLine: "git commit -m 'fix'" },
+              },
+              options: [
+                { optionId: "allow", kind: "allow_once" },
+                { optionId: "deny", kind: "reject_once" },
+              ],
+            },
+          });
+        };
+        resolvePromptReceived();
+      } else if (msg.id === "perm_commit" && msg.result) {
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-wakeup-1",
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "call_git_commit",
+              name: "run_command",
+              kind: "execute",
+              status: "completed",
+              title: "git commit -m 'fix'",
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-wakeup-1",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: {
+                type: "text",
+                text: "\n\nChecks passed and committed a89320a.",
+              },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-wakeup-1",
+            update: { sessionUpdate: "usage_update", used: 12450, size: 1048576 },
+          },
+        });
+      }
+    });
+
+    let resolveSynthetic!: () => void;
+    const syntheticDone = new Promise<void>((resolve) => {
+      resolveSynthetic = resolve;
+    });
+
+    const toolsMap = new Map<
+      string,
+      (input: unknown, ctx: OpenCodeToolContextLike) => Promise<OpenCodeToolResult>
+    >();
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: {
+        assert: async (req) => {
+          permissionAsserts.push(req);
+        },
+      },
+      tool: {
+        transform: async (fn) => {
+          fn({
+            add: (tool) => {
+              toolsMap.set(tool.name, tool.execute);
+            },
+          });
+          return { dispose: async () => {} };
+        },
+      },
+      session: {
+        synthetic: async (input) => {
+          syntheticNotices.push(input as unknown as Record<string, unknown>);
+          resolveSynthetic();
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin({
+      spawn: mock.spawner,
+      traceDir: false,
+      postPromptSettleMs: 25,
+    });
+    const dispose = await plugin.setup(fakeCtx);
+    const agyExec = toolsMap.get("agy")!;
+    const agyJobExec = toolsMap.get("agy_job")!;
+
+    await agyExec(
+      { prompt: "Run make check and commit", background: true },
+      { sessionID: "oc-wakeup", id: "job-wakeup-1" },
+    );
+
+    await promptReceived;
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Must NOT have fired a premature completion notice on "Running make check…"
+    expect(syntheticNotices.length).toBe(0);
+    const midStatus = await agyJobExec(
+      { action: "status", job_id: "job-wakeup-1" },
+      { sessionID: "oc-wakeup" },
+    );
+    expect(midStatus.metadata?.status).toBe("running");
+
+    // Now finish `make check` -> triggers `git commit` permission + final wakeup text
+    finishBgMakeCheck();
+    await syntheticDone;
+
+    expect(permissionAsserts.length).toBe(1);
+    expect(permissionAsserts[0]?.resources).toEqual(["git commit -m 'fix'"]);
+    expect(syntheticNotices.length).toBe(1);
+    const finalNotice = String(syntheticNotices[0]?.text);
+    expect(finalNotice).toContain("Running make check…");
+    expect(finalNotice).toContain("Checks passed and committed a89320a.");
+    expect(finalNotice).toContain("[agy_session_id: agy-wakeup-1]");
+
+    await dispose();
+  });
+
+  test("does not hold session open on IsDaemon: true run_command", async () => {
+    const mock = createMockAcpServer((msg, send) => {
+      if (msg.method === "initialize") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+      } else if (msg.method === "session/new") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { sessionId: "agy-daemon-1" },
+        });
+      } else if (msg.method === "session/prompt") {
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-daemon-1",
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: "call_daemon",
+              name: "run_command",
+              kind: "execute",
+              status: "in_progress",
+              title: "bun run dev",
+              args: { CommandLine: "bun run dev", IsDaemon: true },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "agy-daemon-1",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Dev server started." },
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { stopReason: "end_turn" },
+        });
+      }
+    });
+
+    let agyExec!: (
+      input: unknown,
+      ctx: OpenCodeToolContextLike,
+    ) => Promise<OpenCodeToolResult>;
+
+    const fakeCtx: OpenCodePluginContextLike = {
+      location: { directory: "/tmp/workspace" },
+      permission: { assert: async () => {} },
+      tool: {
+        transform: async (fn) => {
+          fn({
+            add: (tool) => {
+              if (tool.name === "agy") agyExec = tool.execute;
+            },
+          });
+          return { dispose: async () => {} };
+        },
+      },
+    };
+
+    const plugin = createAgyAcpPlugin({ spawn: mock.spawner, traceDir: false });
+    const dispose = await plugin.setup(fakeCtx);
+
+    const res = await agyExec(
+      { prompt: "Start dev server", timeout_ms: 1_000 },
+      { sessionID: "oc-daemon" },
+    );
+    expect(res.content).toContain("Dev server started.");
+    expect(res.metadata?.stopReason).toBe("end_turn");
+
+    await dispose();
   });
 });
 

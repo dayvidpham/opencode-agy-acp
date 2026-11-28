@@ -172,6 +172,10 @@ export class AcpClient {
     return this.stderrBuffer;
   }
 
+  waitForExit(): Promise<number | null> {
+    return this.proc ? this.proc.exited : Promise.resolve(null);
+  }
+
   setTurnHandlers(handlers: {
     onUpdate?: (params: Record<string, unknown>) => void | Promise<void>;
     onPermissionRequest?: (
