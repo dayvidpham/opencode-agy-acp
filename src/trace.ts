@@ -5,7 +5,14 @@
 // `context.progress` with a no-op (`() => Effect.void`), so nested `agy` calls
 // inside `execute` cannot stream progress through `part.state.metadata`.
 
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -23,9 +30,17 @@ export interface AgyTracePlanEntry {
   readonly priority?: string;
 }
 
+export type AgyTraceStatus =
+  | "streaming"
+  | "running"
+  | "completed"
+  | "error"
+  | "cancelled";
+
 export interface AgyTraceRun {
   readonly id: string;
-  readonly status: "streaming" | "running" | "completed" | "error";
+  readonly status: AgyTraceStatus;
+  readonly background?: boolean;
   readonly prompt: string;
   readonly agySessionId?: string;
   readonly model?: string;
@@ -41,6 +56,15 @@ export interface AgyTraceRun {
   readonly latestText?: string;
   readonly charsReceived: number;
   readonly errorMessage?: string;
+}
+
+export type AgyRunControlAction = "cancel" | "background";
+
+export interface AgyRunControlRequest {
+  readonly id: string;
+  readonly runId: string;
+  readonly action: AgyRunControlAction;
+  readonly requestedAt: number;
 }
 
 const MAX_RUNS_PER_SESSION = 30;
@@ -60,6 +84,13 @@ export function traceFilePath(
   dir: string = defaultTraceDir(),
 ): string {
   return path.join(dir, `${sanitizeSessionId(sessionID)}.json`);
+}
+
+export function controlFilePath(
+  sessionID: string,
+  dir: string = defaultTraceDir(),
+): string {
+  return path.join(dir, `${sanitizeSessionId(sessionID)}.ctl.json`);
 }
 
 export function writeSessionTraces(
@@ -101,6 +132,92 @@ export function readSessionTraces(
     return parsed.runs as AgyTraceRun[];
   } catch {
     return [];
+  }
+}
+
+export function getSessionControlMtime(
+  sessionID: string,
+  dir: string = defaultTraceDir(),
+): number {
+  try {
+    return statSync(controlFilePath(sessionID, dir)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+export function requestRunControl(
+  sessionID: string,
+  runId: string,
+  action: AgyRunControlAction,
+  dir: string = defaultTraceDir(),
+): void {
+  if (!sessionID || !runId) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const file = controlFilePath(sessionID, dir);
+    const now = Date.now();
+    let existing: AgyRunControlRequest[] = [];
+    try {
+      const raw = readFileSync(file, "utf8");
+      const parsed = JSON.parse(raw) as { requests?: unknown };
+      if (Array.isArray(parsed?.requests)) {
+        existing = (parsed.requests as AgyRunControlRequest[]).filter(
+          (req) =>
+            req &&
+            typeof req.runId === "string" &&
+            (req.action === "cancel" || req.action === "background") &&
+            typeof req.requestedAt === "number" &&
+            now - req.requestedAt < 60_000,
+        );
+      }
+    } catch {
+      // No existing control file yet.
+    }
+    existing.push({
+      id: `${process.pid}-${now}-${++tmpSeq}`,
+      runId,
+      action,
+      requestedAt: now,
+    });
+    const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ version: 1, requests: existing }), "utf8");
+    renameSync(tmp, file);
+  } catch {
+    // Control signaling is best-effort and must never crash the TUI.
+  }
+}
+
+export function takeSessionControlRequests(
+  sessionID: string,
+  dir: string = defaultTraceDir(),
+): AgyRunControlRequest[] {
+  if (!sessionID) return [];
+  const file = controlFilePath(sessionID, dir);
+  const claim = `${file}.${process.pid}.${++tmpSeq}.claim`;
+  try {
+    renameSync(file, claim);
+  } catch {
+    return [];
+  }
+  try {
+    const raw = readFileSync(claim, "utf8");
+    const parsed = JSON.parse(raw) as { requests?: unknown };
+    if (!Array.isArray(parsed?.requests)) return [];
+    return (parsed.requests as AgyRunControlRequest[]).filter(
+      (req) =>
+        req &&
+        typeof req.runId === "string" &&
+        (req.action === "cancel" || req.action === "background"),
+    );
+  } catch {
+    return [];
+  } finally {
+    try {
+      rmSync(claim, { force: true });
+    } catch {
+      // ignore
+    }
   }
 }
 

@@ -36,6 +36,9 @@ When the `agy-trace` panel is focused (or in fullscreen):
 | --- | --- |
 | `Tab` / `Shift+Tab` | Select next / previous trajectory |
 | `Enter` / `Space` (or click header) | Expand / collapse selected trajectory |
+| `b` (or click `[b bg]`) | Move selected foreground running trajectory into the background |
+| `x` (or click `[x cancel]`) | Cancel selected running trajectory via ACP `session/cancel` |
+| `s` | Toggle showing all steps vs. latest 15 on selected trajectory |
 | `e` / `c` | Expand all / collapse all trajectories |
 | `f` | Toggle fullscreen / split |
 | `q` / `Esc` | Close panel |
@@ -43,7 +46,9 @@ When the `agy-trace` panel is focused (or in fullscreen):
 | `PgDn` / `Ctrl+D`, `PgUp` / `Ctrl+U` | Page down / up |
 | `g` / `Shift+G` | Jump to top / bottom |
 
-## Tool Interface (`agy`)
+## Tool Interface (`agy` & `agy_job`)
+
+### `agy`
 
 | Parameter | Type | Description |
 | --- | --- | --- |
@@ -52,8 +57,18 @@ When the `agy-trace` panel is focused (or in fullscreen):
 | `cwd` | `string` | Working directory for the `agy` session (defaults to the current workspace). |
 | `model` | `string` | Optional model ID to select via ACP `session/set_model` (e.g. `gemini-4-hydrogen-medium`, `gemini-4-neon-medium`, `gemini-4-argon-medium`, or `claude-sonnet-5-5-medium` / `claude-opus-5-5-medium`). |
 | `timeout_ms` | `number` | Turn timeout in ms (default `900000` = 15 min; min `1000`, max `14400000`). |
+| `background` | `boolean` | Set `true` to detach immediately after ACP session initialization (`session/new` / `session/load`), returning `job_id` + `agy_session_id` right away and waking the OpenCode session automatically via `ctx.session.synthetic` when `agy` finishes. |
+| `wait_ms` | `number` | Optional foreground wait threshold in ms: waits up to `wait_ms` for synchronous completion and auto-backgrounds the call if still running. |
 
-Every response (success or error, once a session exists) appends `[agy_session_id: <id>]` to `content` and includes `metadata.agySessionId`, making explicit follow-ups and timeout recovery straightforward.
+Every response (success, background launch, or error once a session exists) appends `[agy_session_id: <id>]` to `content` and includes `metadata.agySessionId`, making explicit follow-ups and timeout recovery straightforward.
+
+### `agy_job`
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `action` | `"list" \| "status" \| "wait" \| "cancel"` (required) | List jobs in the current OpenCode session, inspect non-blocking status/result, wait for completion, or cancel a running job. |
+| `job_id` | `string` | Target `agy` job ID (from `[agy_job_id: <id>]` or `metadata.jobId`). Optional for `list` and `wait`; required for `cancel` (pass `"all"` to cancel all running jobs in the session). |
+| `timeout_ms` | `number` | Max wait duration in ms for `action: "wait"` (default `900000` = 15 min). Exceeding `timeout_ms` returns current live progress without cancelling the background job. |
 
 ### Structured Errors (`AGY_ERROR [CODE]`)
 
